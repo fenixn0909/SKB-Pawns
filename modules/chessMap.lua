@@ -58,7 +58,14 @@ local DEFAULT_SINK_TURNS = 4
 
 -- -------------------------------------------------------------------- NEW
 -- levelRows: array of equal-length strings, one per map row, using LEGEND_CHARS
--- opts: { originX, originY, availableWidth, availableHeight, sinkTurns }
+-- opts: { tileSize, originX, originY, sinkTurns }
+--
+-- Tile size is now FIXED (not scaled to fit an available viewport) -- the
+-- world can be larger than the screen, and modules/camera.lua is what pans
+-- a scrollable viewport around it. originX/originY default to 0 (the map's
+-- own coordinate frame); a non-zero origin is still supported for anyone
+-- drawing a map without a camera (e.g. a future minimap), but main.lua's
+-- normal setup leaves them at 0 and lets the camera do all positioning.
 function chessMap.new(levelRows, opts)
     opts = opts or {}
     local self = setmetatable({}, chessMap)
@@ -66,14 +73,12 @@ function chessMap.new(levelRows, opts)
     self.rows = #levelRows
     self.cols = #levelRows[1]
 
-    local availW = opts.availableWidth or 1000
-    local availH = opts.availableHeight or 700
-    self.tileSize = math.floor(math.min(availW / self.cols, availH / self.rows))
+    self.tileSize = opts.tileSize or 48
+    self.originX = opts.originX or 0
+    self.originY = opts.originY or 0
 
-    local boardW = self.tileSize * self.cols
-    local boardH = self.tileSize * self.rows
-    self.originX = (opts.originX or 0) + math.floor((availW - boardW) / 2)
-    self.originY = (opts.originY or 0) + math.floor((availH - boardH) / 2)
+    self.pixelW = self.tileSize * self.cols
+    self.pixelH = self.tileSize * self.rows
 
     self.sinkTurns = opts.sinkTurns or DEFAULT_SINK_TURNS
 

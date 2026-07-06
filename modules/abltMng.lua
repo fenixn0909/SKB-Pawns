@@ -22,6 +22,36 @@ abltMng.TARGETING = {
     DIRECTION_TILE = "direction_tile",-- tap any tile to imply a cardinal direction
 }
 
+-- How an ability activates. See README's design notes for the full picture;
+-- short version:
+--   ACTIVE  -- player arms it (click a button), then supplies a target if
+--              needed. Everything before this trigger system existed was
+--              implicitly ACTIVE (Push All, Swap, Drag, Guard, Fire Beam).
+--   PASSIVE -- always on, no activation at all (closer to a trait than a
+--              button -- reserved for future abilities that are just
+--              permanent stat modifiers; none of the defaults below use it
+--              yet, but the slot exists so mechanisms/equipment can grant
+--              one via a buff).
+--   MOVING  -- fires as *what a directional input does* for this pawn,
+--              via pawn.movingAbility (see pawnDplyr.KIND_INFO). Replaces
+--              baseline one-tile movement for that pawn; see
+--              chessUpdtr:requestStep. execute(user, {dCol,dRow}, ctx).
+--   FLOW    -- fires as a *reaction* to being moved by someone/something
+--              else (pushed, dragged, swapped). Pull/Pull+'s chain effect
+--              on the pawn behind the mover is the current example, but
+--              it's implemented as part of the mover's own MOVING ability
+--              rather than a separate registry entry on the dragged pawn --
+--              this tag exists for future abilities that need to react on
+--              the *receiving* end of a displacement (e.g. "explodes when
+--              pushed"), which would be checked from chessUpdtr's
+--              tryPushChain/dragBehindChain primitives.
+abltMng.TRIGGER = {
+    ACTIVE  = "active",
+    PASSIVE = "passive",
+    MOVING  = "moving",
+    FLOW    = "flow",
+}
+
 local registry = {}
 
 function abltMng.register(def)

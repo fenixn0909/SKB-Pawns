@@ -1,4 +1,4 @@
-# Order of the Sinking Star -- Solar2D Mockup
+# SKB Pawns -- Solar2D Mockup
 
 A tactics/puzzle mockup: push, drag, and swap pawns around a grid to solve
 each room, while the "sinking star" hazard tiles count down and swallow

@@ -9,6 +9,7 @@ local function fakeDisplayObject(extra)
     local obj = extra or {}
     obj.x = obj.x or 0
     obj.y = obj.y or 0
+    obj.rotation = obj.rotation or 0
     obj._listeners = {}
     function obj:addEventListener(kind, fn) self._listeners[kind] = fn end
     function obj:removeSelf() obj._removed = true end
@@ -17,6 +18,12 @@ local function fakeDisplayObject(extra)
     function obj:insert(child) end
     function obj:toBack() end
     function obj:toFront() end
+    -- Real Solar2D converts content(stage) coords into this object's local
+    -- coordinate space, accounting for any parent group transforms. The
+    -- stub has no real transform stack, so it's a no-op identity mapping --
+    -- fine for headless tests, which drive logic via grid coordinates
+    -- directly rather than simulated taps.
+    function obj:contentToLocal(x, y) return x, y end
     return obj
 end
 
@@ -30,6 +37,10 @@ function display.newGroup()
     return fakeDisplayObject({})
 end
 
+function display.newContainer(w, h)
+    return fakeDisplayObject({ width = w, height = h })
+end
+
 function display.newRect(parentOrX, xOrY, yOrW, wOrH, h)
     -- support both (x,y,w,h) and (parent,x,y,w,h) call signatures
     local obj = fakeDisplayObject({})
@@ -38,6 +49,11 @@ end
 display.newRoundedRect = display.newRect
 
 function display.newImageRect(a, b, c, d)
+    return fakeDisplayObject({})
+end
+
+function display.newPolygon(parentOrX, xOrY, yOrVertices, vertices)
+    -- supports both (parent, x, y, vertices) and (x, y, vertices) signatures
     return fakeDisplayObject({})
 end
 
