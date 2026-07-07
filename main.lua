@@ -34,9 +34,9 @@ titleText:setFillColor(0.85, 0.85, 0.95)
 -- No camera panning needed -- the map sits centered in the board.
 local BOARD_X, BOARD_Y = 8, 40
 local SIDEBAR_W = 150
-local SIDEBAR_X = display.contentWidth - SIDEBAR_W
-local BOARD_W = SIDEBAR_X - BOARD_X - 8
+local BOARD_W = display.contentWidth - BOARD_X - SIDEBAR_W - 16
 local BOARD_H = display.contentHeight - BOARD_Y - 10
+local SIDEBAR_X = BOARD_X + BOARD_W + 8
 
 local NUM_COLS = #sampleLevel.rows[1]
 local NUM_ROWS = #sampleLevel.rows
