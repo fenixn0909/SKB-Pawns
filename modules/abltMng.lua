@@ -6,7 +6,7 @@
     targeting mode, range, and an execute(user, target, ctx) function.
 
     abltMng does NOT touch the board directly -- it's handed a small `ctx`
-    (context) table of primitives (tryPush, swapPawns, pullPawn, traceBeam,
+    (context) table of primitives (tryPushChain, swapPawns, pullPawn, traceBeam,
     setStatus, ...) by chessUpdtr, which is the module that actually owns
     board mutation and turn flow. This keeps "what an ability does" (here)
     separate from "how the board resolves interactions" (chessUpdtr),
@@ -81,18 +81,19 @@ function abltMng.registerDefaults()
     abltMng.register({
         id = "push_all",
         name = "Push All",
-        description = "Shove all adjacent pawns one tile outward.",
+        description = "Shove all adjacent pawns (and any chain behind them) outward.",
         targeting = abltMng.TARGETING.NONE,
+        trigger = abltMng.TRIGGER.ACTIVE,
         apCost = 1,
         execute = function(user, _target, ctx)
             local dirs = { {1,0}, {-1,0}, {0,1}, {0,-1} }
             local affected = {}
             for _, d in ipairs(dirs) do
                 local nc, nr = user.col + d[1], user.row + d[2]
-                local other = ctx.getAt(nc, nr)
-                if other and other.id ~= user.id then
-                    if ctx.tryPush(other, d[1], d[2]) then
-                        table.insert(affected, other.id)
+                if ctx.getAt(nc, nr) then
+                    local ok, chain = ctx.tryPushChain(nc, nr, d[1], d[2], math.huge)
+                    if ok then
+                        for _, p in ipairs(chain) do table.insert(affected, p.id) end
                     end
                 end
             end
@@ -107,6 +108,7 @@ function abltMng.registerDefaults()
         name = "Swap",
         description = "Swap positions with an adjacent pawn.",
         targeting = abltMng.TARGETING.ADJACENT_PAWN,
+        trigger = abltMng.TRIGGER.ACTIVE,
         apCost = 1,
         canTarget = function(user, target, ctx)
             if not target or target.id == user.id then return false end
@@ -125,6 +127,7 @@ function abltMng.registerDefaults()
         name = "Drag",
         description = "Pull a pawn one tile toward you (range 3, clear line).",
         targeting = abltMng.TARGETING.PAWN_IN_LINE,
+        trigger = abltMng.TRIGGER.ACTIVE,
         range = 3,
         apCost = 1,
         canTarget = function(user, target, ctx)
@@ -147,6 +150,7 @@ function abltMng.registerDefaults()
         name = "Fire Beam",
         description = "Damage everything in a straight line until a wall.",
         targeting = abltMng.TARGETING.DIRECTION_TILE,
+        trigger = abltMng.TRIGGER.ACTIVE,
         apCost = 1,
         execute = function(user, targetTile, ctx)
             local dc = targetTile.col - user.col
@@ -170,10 +174,133 @@ function abltMng.registerDefaults()
         name = "Guard",
         description = "Braces -- next hit or push against you this round is reduced.",
         targeting = abltMng.TARGETING.NONE,
+        trigger = abltMng.TRIGGER.ACTIVE,
         apCost = 1,
         execute = function(user, _target, ctx)
             ctx.setStatus(user.id, "guarded", 1)
             return { affectedIds = { user.id } }
+        end,
+    })
+
+    -- ---------------------------------------------------------- MOVING ABILITIES
+    -- These replace baseline one-tile movement for whichever pawn has them
+    -- as pawn.movingAbility (see pawnDplyr.KIND_INFO). Signature differs
+    -- from the ACTIVE abilities above: execute(user, moveVec, ctx), where
+    -- moveVec = {dCol=, dRow=} is the direction the input asked to move
+    -- in. Return a table including `ok` (chessUpdtr:requestStep treats a
+    -- missing `ok` as true, but every def below sets it explicitly) --
+    -- false means the input didn't do anything (nothing to report back to
+    -- the player beyond "that didn't work").
+
+    -- PUSH: walking into a pawn shoves it -- and anything chained directly
+    -- behind it, unlimited depth -- forward by one tile, then you step
+    -- into the space it left. Walking into open floor is just a normal step.
+    abltMng.register({
+        id = "push",
+        name = "Push (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Walking into a pawn shoves it, and any chain behind it (unlimited depth), forward.",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            local nc, nr = user.col + dCol, user.row + dRow
+            if not ctx.isWalkable(nc, nr) then return { ok = false, reason = "blocked" } end
+            if not ctx.getAt(nc, nr) then
+                ctx.relocate(user.id, nc, nr)
+                return { ok = true }
+            end
+            local success = ctx.tryPushChain(nc, nr, dCol, dRow, math.huge)
+            if not success then return { ok = false, reason = "push blocked" } end
+            ctx.relocate(user.id, nc, nr)
+            return { ok = true }
+        end,
+    })
+
+    -- PUSH+: same as Push, but can only muscle through a chain of up to 2
+    -- pawns -- a longer line won't budge at all.
+    abltMng.register({
+        id = "push_plus",
+        name = "Push+ (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Like Push, but the chain it can shove tops out at 2 pawns.",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            local nc, nr = user.col + dCol, user.row + dRow
+            if not ctx.isWalkable(nc, nr) then return { ok = false, reason = "blocked" } end
+            if not ctx.getAt(nc, nr) then
+                ctx.relocate(user.id, nc, nr)
+                return { ok = true }
+            end
+            local success = ctx.tryPushChain(nc, nr, dCol, dRow, 2)
+            if not success then return { ok = false, reason = "push blocked" } end
+            ctx.relocate(user.id, nc, nr)
+            return { ok = true }
+        end,
+    })
+
+    -- SWAP (Moving): instead of stepping, instantly swaps with the first
+    -- pawn along your facing direction -- unlimited range, but a wall
+    -- blocks line of sight (only pawns before the first wall count). Falls
+    -- back to a normal one-tile step if nothing's found to swap with.
+    abltMng.register({
+        id = "swap_move",
+        name = "Swap (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Swaps with the first pawn you're facing; walls block line of sight. Falls back to a normal step if there's nothing to swap with.",
+        execute = function(user, moveVec, ctx)
+            local target = ctx.swapFacing(user, false)
+            if target then
+                ctx.swapPawns(user.id, target.id)
+                return { ok = true, affectedIds = { target.id } }
+            end
+            return { ok = ctx.stepIfClear(user, moveVec.dCol, moveVec.dRow) }
+        end,
+    })
+
+    -- SWAP+ (Moving): same as Swap, but sees straight through walls.
+    abltMng.register({
+        id = "swap_plus",
+        name = "Swap+ (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Swaps with the first pawn you're facing, even through walls. Falls back to a normal step if there's nothing to swap with.",
+        execute = function(user, moveVec, ctx)
+            local target = ctx.swapFacing(user, true)
+            if target then
+                ctx.swapPawns(user.id, target.id)
+                return { ok = true, affectedIds = { target.id } }
+            end
+            return { ok = ctx.stepIfClear(user, moveVec.dCol, moveVec.dRow) }
+        end,
+    })
+
+    -- PULL (Moving): a normal one-tile step, plus whatever pawn is
+    -- directly behind you gets dragged into the tile you just vacated.
+    abltMng.register({
+        id = "pull",
+        name = "Pull (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Step forward normally; the pawn directly behind you is dragged into the tile you left.",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            local oldCol, oldRow = user.col, user.row
+            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+            local dragged = ctx.dragBehindChain(user, dCol, dRow, oldCol, oldRow, false)
+            return { ok = true, affectedIds = dragged }
+        end,
+    })
+
+    -- PULL+ (Moving): same, but the whole contiguous line behind you
+    -- shuffles forward one tile each, like a conga line / sneaking train.
+    abltMng.register({
+        id = "pull_plus",
+        name = "Pull+ (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Step forward normally; the whole contiguous line of pawns behind you shuffles forward one tile each.",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            local oldCol, oldRow = user.col, user.row
+            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+            local dragged = ctx.dragBehindChain(user, dCol, dRow, oldCol, oldRow, true)
+            return { ok = true, affectedIds = dragged }
         end,
     })
 end

@@ -13,6 +13,7 @@
 ]]
 
 local abltMng = require("modules.abltMng")
+local chessMap = require("modules.chessMap")
 
 local chessUpdtr = {}
 chessUpdtr.__index = chessUpdtr
@@ -47,19 +48,6 @@ function chessUpdtr:buildCtx()
                 c, r = c + dc, r + dr
             end
             return true
-        end,
-
-        tryPush = function(pawn, dCol, dRow)
-            if pawn.statuses.guarded then
-                pawn.statuses.guarded = nil -- guard absorbs the push entirely
-                return false
-            end
-            local nc, nr = pawn.col + dCol, pawn.row + dRow
-            if map:isWalkable(nc, nr) and not dplyr:isOccupied(nc, nr) then
-                dplyr:moveTo(pawn.id, nc, nr)
-                return true
-            end
-            return false
         end,
 
         swapPawns = function(idA, idB)
@@ -105,6 +93,128 @@ function chessUpdtr:buildCtx()
             local pawn = dplyr:getById(pawnId)
             if pawn then pawn.statuses[name] = turns end
         end,
+
+        isWalkable = function(col, row) return map:isWalkable(col, row) end,
+
+        -- Unconditional relocation -- used where the caller has already
+        -- established the destination is safe (e.g. a tile a pawn just
+        -- vacated), so there's no need to re-check walkability/occupancy.
+        relocate = function(pawnId, col, row)
+            dplyr:moveTo(pawnId, col, row)
+        end,
+
+        -- Baseline "walk one tile" as a reusable primitive -- both the
+        -- default (no movingAbility) path and several MOVING abilities'
+        -- fallback behavior share this exact rule.
+        stepIfClear = function(pawn, dCol, dRow)
+            local nc, nr = pawn.col + dCol, pawn.row + dRow
+            if map:isWalkable(nc, nr) and not dplyr:isOccupied(nc, nr) then
+                dplyr:moveTo(pawn.id, nc, nr)
+                return true
+            end
+            return false
+        end,
+
+        -- Collects a contiguous line of pawns starting at (startCol,startRow)
+        -- going in direction (dCol,dRow), and -- if the chain is <= maxDepth
+        -- long and there's a walkable, unoccupied tile right after it --
+        -- shifts the whole chain forward by one tile. A guarded pawn
+        -- anywhere in the chain absorbs the push and cancels the whole
+        -- attempt (its guard status is consumed either way, matching the
+        -- original single-pawn tryPush semantics). A Lightweight pawn that
+        -- ends up in the lead position is carried one extra tile if clear.
+        -- Returns (true, chain) on success, or (false) if blocked.
+        tryPushChain = function(startCol, startRow, dCol, dRow, maxDepth)
+            maxDepth = maxDepth or math.huge
+            local chain = {}
+            local c, r = startCol, startRow
+            while true do
+                if not map:isWalkable(c, r) then return false end
+                local p = dplyr:getAt(c, r)
+                if not p then break end
+                if p.statuses.guarded then
+                    p.statuses.guarded = nil
+                    return false
+                end
+                table.insert(chain, p)
+                if #chain > maxDepth then return false end
+                c, r = c + dCol, r + dRow
+            end
+
+            -- move from the tail (farthest, lands in the tile we just
+            -- confirmed is clear) back to the head, so occupancy never
+            -- collides mid-shift
+            for i = #chain, 1, -1 do
+                local p = chain[i]
+                local nc, nr = p.col + dCol, p.row + dRow
+                dplyr:moveTo(p.id, nc, nr)
+            end
+
+            local lead = chain[#chain]
+            if lead and dplyr:hasTrait(lead, "lightweight") then
+                local ec, er = lead.col + dCol, lead.row + dRow
+                if map:isWalkable(ec, er) and not dplyr:isOccupied(ec, er) then
+                    dplyr:moveTo(lead.id, ec, er)
+                end
+            end
+
+            return true, chain
+        end,
+
+        -- Scans from `user` along its facing direction for the first pawn
+        -- found. A WALL tile blocks the scan entirely (nothing beyond it
+        -- counts) unless ignoreWalls is true, in which case walls are
+        -- transparent to the search. Returns the target pawn, or nil.
+        swapFacing = function(user, ignoreWalls)
+            local dCol, dRow = user.facing[1], user.facing[2]
+            local c, r = user.col + dCol, user.row + dRow
+            while map:isInBounds(c, r) do
+                local tile = map:getTile(c, r)
+                if tile.type == chessMap.TILE.WALL then
+                    if not ignoreWalls then return nil end
+                else
+                    local p = dplyr:getAt(c, r)
+                    if p then return p end
+                end
+                c, r = c + dCol, r + dRow
+            end
+            return nil
+        end,
+
+        -- After `user` has stepped from (oldCol,oldRow) in direction
+        -- (dCol,dRow), drags whoever is directly behind that vacated tile
+        -- into it. If `unlimited` is true, keeps chaining down the whole
+        -- contiguous line behind (Pull+); otherwise only the immediate
+        -- neighbor moves (Pull). A guarded pawn absorbs the drag and stops
+        -- the chain there. A Lightweight pawn at the end of the chain gets
+        -- carried one extra tile if the tile beyond is clear. Returns the
+        -- array of dragged pawn ids.
+        dragBehindChain = function(user, dCol, dRow, oldCol, oldRow, unlimited)
+            local emptyCol, emptyRow = oldCol, oldRow
+            local draggedIds = {}
+            local lastDragged = nil
+            while true do
+                local behindCol, behindRow = emptyCol - dCol, emptyRow - dRow
+                local behind = dplyr:getAt(behindCol, behindRow)
+                if not behind then break end
+                if behind.statuses.guarded then
+                    behind.statuses.guarded = nil
+                    break
+                end
+                dplyr:moveTo(behind.id, emptyCol, emptyRow)
+                table.insert(draggedIds, behind.id)
+                lastDragged = behind
+                emptyCol, emptyRow = behindCol, behindRow
+                if not unlimited then break end
+            end
+            if lastDragged and dplyr:hasTrait(lastDragged, "lightweight") then
+                local ec, er = lastDragged.col + dCol, lastDragged.row + dRow
+                if map:isWalkable(ec, er) and not dplyr:isOccupied(ec, er) then
+                    dplyr:moveTo(lastDragged.id, ec, er)
+                end
+            end
+            return draggedIds
+        end,
     }
 end
 
@@ -119,7 +229,11 @@ local function isUnitCardinal(dCol, dRow)
 end
 
 -- Moves a pawn exactly one tile in direction (dCol, dRow), e.g. (0,-1) for
--- "up". This is what arrow-key input calls directly.
+-- "up" -- UNLESS the pawn has a MOVING-trigger ability assigned
+-- (pawn.movingAbility), in which case that ability decides what a
+-- directional input does instead (see modules/abltMng.lua's Push/Swap/Pull
+-- family). Facing always updates to the input direction first, regardless
+-- of which path handles the actual movement, since Swap depends on it.
 function chessUpdtr:requestStep(pawn, dCol, dRow)
     local expectedFaction = (self.turn == chessUpdtr.TURN.PC) and "pc" or "enemy"
     if pawn.faction ~= expectedFaction then
@@ -129,16 +243,25 @@ function chessUpdtr:requestStep(pawn, dCol, dRow)
         return false, "not a single orthogonal step"
     end
 
-    local nc, nr = pawn.col + dCol, pawn.row + dRow
-    if not self.map:isWalkable(nc, nr) then
-        return false, "blocked"
-    end
-    if self.dplyr:isOccupied(nc, nr) then
-        return false, "occupied"
+    self.dplyr:setFacing(pawn.id, dCol, dRow)
+
+    local movingDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
+    if movingDef and movingDef.trigger == abltMng.TRIGGER.MOVING then
+        local result = movingDef.execute(pawn, { dCol = dCol, dRow = dRow }, self.ctx) or {}
+        local ok = (result.ok ~= false)
+        if ok then
+            self:checkClearCondition()
+            self:notifyChanged()
+        end
+        return ok, result.reason
     end
 
-    self.dplyr:moveTo(pawn.id, nc, nr)
+    -- baseline: exactly one tile, straight, onto open unoccupied floor
+    if not self.ctx.stepIfClear(pawn, dCol, dRow) then
+        return false, "blocked"
+    end
     self:checkClearCondition()
+    self:notifyChanged()
     return true
 end
 
@@ -170,7 +293,16 @@ function chessUpdtr:useAbility(user, abilityId, target)
 
     local result = def.execute(user, target, self.ctx)
     self:checkClearCondition()
+    self:notifyChanged()
     return true, result
+end
+
+-- Fired after any action that changes board state (a move, an ability, or
+-- a completed end-of-turn). modules/historyMng.lua hooks this (via
+-- updtr.onStateChanged) to take its undo/redo snapshots -- chessUpdtr
+-- doesn't know history exists, it just offers this one seam.
+function chessUpdtr:notifyChanged()
+    if self.onStateChanged then self.onStateChanged() end
 end
 
 -- ------------------------------------------------------------------ TURN
@@ -182,6 +314,7 @@ function chessUpdtr:endTurn()
         self.roundNumber = self.roundNumber + 1
         self:tickStatuses()
         self:tickHazards()
+        self:notifyChanged()
     end
     self:checkClearCondition()
 
@@ -212,7 +345,7 @@ end
 function chessUpdtr:findBeamTarget(enemy)
     local pcs = self.dplyr:getAllByFaction("pc")
     for _, pc in ipairs(pcs) do
-        if pc.col == enemy.col or pc.row == enemy.row then
+        if not self.dplyr:hasTrait(pc, "stealth") and (pc.col == enemy.col or pc.row == enemy.row) then
             if self.ctx.isLineClear(enemy.col, enemy.row, pc.col, pc.row) then
                 return { col = pc.col, row = pc.row }
             end

@@ -32,6 +32,7 @@ display.contentWidth = 1280
 display.contentHeight = 720
 display.contentCenterX = 640
 display.contentCenterY = 360
+function display.setDefault(...) end
 
 function display.newGroup()
     return fakeDisplayObject({})

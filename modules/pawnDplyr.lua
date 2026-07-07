@@ -34,17 +34,17 @@ pawnDplyr.FACTION = {
 pawnDplyr.KIND_INFO = {
     pc_knight = {
         image = "images/pc_knight.png", faction = pawnDplyr.FACTION.PC,
-        name = "Knight", hp = 6, abilities = { "push_all", "swap" },
+        name = "Knight", hp = 6, abilities = {},
         movingAbility = "push", traits = {},
     },
     pc_mage = {
         image = "images/pc_mage.png", faction = pawnDplyr.FACTION.PC,
-        name = "Mage", hp = 4, abilities = { "drag", "swap" },
+        name = "Mage", hp = 4, abilities = {},
         movingAbility = "swap_move", traits = { "lightweight" },
     },
     pc_guardian = {
         image = "images/pc_guardian.png", faction = pawnDplyr.FACTION.PC,
-        name = "Guardian", hp = 8, abilities = { "push_all", "guard" },
+        name = "Guardian", hp = 8, abilities = { "guard" },
         movingAbility = "pull", traits = {},
     },
     enemy_brute = {
@@ -53,7 +53,7 @@ pawnDplyr.KIND_INFO = {
     },
     enemy_turret = {
         image = "images/enemy_turret.png", faction = pawnDplyr.FACTION.ENEMY,
-        name = "Turret", hp = 3, abilities = { "fire_beam" }, traits = { "stealth" },
+        name = "Turret", hp = 3, abilities = { "fire_beam" }, traits = {},
     },
     enemy_wraith = {
         image = "images/enemy_wraith.png", faction = pawnDplyr.FACTION.ENEMY,
@@ -122,37 +122,22 @@ local function copyTraitSet(list)
     return set
 end
 
--- ----------------------------------------------------------------- DEPLOY
--- kind: key into KIND_INFO. opts: { faction override, hp override }
-function pawnDplyr:deploy(kind, col, row, opts)
-    opts = opts or {}
-    local info = pawnDplyr.KIND_INFO[kind]
-    assert(info, "pawnDplyr: unknown kind '" .. tostring(kind) .. "'")
+-- shallow-copies a plain dict (used for restoring a pawn's traits/statuses
+-- from a history snapshot -- see :_recreateFromSnapshot). Distinct from
+-- copyTraitSet above only in its input shape: this copies an existing
+-- {key=true/turns,...} dict rather than an array of ids.
+local function copyDict(d)
+    local c = {}
+    for k, v in pairs(d or {}) do c[k] = v end
+    return c
+end
 
-    local id = self.nextId
-    self.nextId = self.nextId + 1
-
-    local faction = opts.faction or info.faction
-
-    local pawn = {
-        id = id,
-        kind = kind,
-        subType = info.subType,
-        name = info.name,
-        faction = faction,
-        hp = opts.hp or info.hp,
-        maxHp = opts.hp or info.hp,
-        abilities = info.abilities,
-        movingAbility = info.movingAbility,
-        traits = copyTraitSet(info.traits),
-        col = col,
-        row = row,
-        isMovableOnly = info.isMovableOnly or info.isMechanism,
-        statuses = {}, -- e.g. statuses.guarded = turnsRemaining; see chessUpdtr for buff/debuff shapes
-        facing = DEFAULT_FACING[faction] or { 0, 1 },
-    }
-
-    local x, y = self.map:gridToWorld(col, row)
+-- Builds the container/sprite/HP-label/facing-indicator for a pawn table
+-- that already has all its data fields set (id, kind, col, row, hp, ...).
+-- Shared by :deploy() (fresh pawn) and :_recreateFromSnapshot() (restoring
+-- a pawn from undo/redo/restart history) so the two can never drift apart.
+function pawnDplyr:_buildVisuals(pawn, info)
+    local x, y = self.map:gridToWorld(pawn.col, pawn.row)
     local size = self.map.tileSize
 
     -- Everything visual for this pawn lives in one container group,
@@ -196,9 +181,84 @@ function pawnDplyr:deploy(kind, col, row, opts)
         pawn.facingIndicator = facingGroup
         self:_applyFacingRotation(pawn)
     end
+end
+
+-- ----------------------------------------------------------------- DEPLOY
+-- kind: key into KIND_INFO. opts: { faction override, hp override }
+function pawnDplyr:deploy(kind, col, row, opts)
+    opts = opts or {}
+    local info = pawnDplyr.KIND_INFO[kind]
+    assert(info, "pawnDplyr: unknown kind '" .. tostring(kind) .. "'")
+
+    local id = self.nextId
+    self.nextId = self.nextId + 1
+
+    local faction = opts.faction or info.faction
+
+    local pawn = {
+        id = id,
+        kind = kind,
+        subType = info.subType,
+        name = info.name,
+        faction = faction,
+        hp = opts.hp or info.hp,
+        maxHp = opts.hp or info.hp,
+        abilities = info.abilities,
+        movingAbility = info.movingAbility,
+        traits = copyTraitSet(info.traits),
+        col = col,
+        row = row,
+        isMovableOnly = info.isMovableOnly or info.isMechanism,
+        statuses = {}, -- e.g. statuses.guarded = turnsRemaining; see chessUpdtr for buff/debuff shapes
+        facing = DEFAULT_FACING[faction] or { 0, 1 },
+    }
+
+    self:_buildVisuals(pawn, info)
 
     self.pawns[id] = pawn
     self.occupancy[occKey(col, row)] = id
+
+    return pawn
+end
+
+-- ------------------------------------------------------------- HISTORY
+-- Rebuilds one pawn's live object + visuals from a plain-data snapshot
+-- (see modules/historyMng.lua). Distinct from :deploy() because it must
+-- restore an EXACT prior state (id, hp, statuses, traits, facing) instead
+-- of fresh defaults from KIND_INFO -- note the defensive copyDict() calls,
+-- since the snapshot's own tables must never be handed out as a live
+-- pawn's table (gameplay mutating them would corrupt that history entry
+-- for good).
+--
+-- Does NOT call pawnCon:registerSelectable -- the fresh sprite has no tap
+-- listener yet. The caller (historyMng, via its onPawnRecreated hook) is
+-- responsible for re-registering it.
+function pawnDplyr:_recreateFromSnapshot(entry)
+    local info = pawnDplyr.KIND_INFO[entry.kind]
+    assert(info, "pawnDplyr: unknown kind '" .. tostring(entry.kind) .. "' in snapshot")
+
+    local pawn = {
+        id = entry.id,
+        kind = entry.kind,
+        subType = entry.subType,
+        name = entry.name,
+        faction = entry.faction,
+        hp = entry.hp,
+        maxHp = entry.maxHp,
+        abilities = entry.abilities,
+        movingAbility = entry.movingAbility,
+        traits = copyDict(entry.traits),
+        col = entry.col,
+        row = entry.row,
+        isMovableOnly = entry.isMovableOnly,
+        statuses = copyDict(entry.statuses),
+        facing = { entry.facing[1], entry.facing[2] },
+    }
+
+    self:_buildVisuals(pawn, info)
+
+    self.pawns[pawn.id] = pawn
+    self.occupancy[occKey(pawn.col, pawn.row)] = pawn.id
 
     return pawn
 end

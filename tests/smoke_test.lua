@@ -12,7 +12,7 @@ local function line(msg) print("---- " .. msg .. " ----") end
 abltMng.registerDefaults()
 
 line("BUILD MAP")
-local map = chessMap.new(sampleLevel.rows, { availableWidth = 1000, availableHeight = 654, originX = 10, originY = 46 })
+local map = chessMap.new(sampleLevel.rows, { tileSize = 48 })
 print(string.format("cols=%d rows=%d tileSize=%d spawnPCs=%d spawnEnemies=%d goals=%d",
     map.cols, map.rows, map.tileSize, #map.spawnPCs, #map.spawnEnemies, #map:getGoalTiles()))
 assert(map.cols == 20 and map.rows == 15, "map dimensions wrong")
@@ -197,5 +197,194 @@ updtr.turn = chessUpdtr.TURN.PC -- ensure we start from PC phase like real play
 updtr:endTurn() -- PC -> enemy (AI fires) -> PC
 assert(mage.hp < mageHpBefore, "mage should have taken beam damage from the automatic enemy AI phase, hp=" .. tostring(mage.hp))
 print("auto enemy AI OK: mage hp", mageHpBefore, "->", mage.hp)
+
+-- ------------------------------------------------------- PUSH (MOVING)
+line("PUSH (MOVING) -- UNLIMITED CHAIN")
+dplyr:moveTo(knight.id, 3, 2) -- row 2 is fully open floor, no interior walls
+local s1 = dplyr:deploy("stone_a", 4, 2)
+local s2 = dplyr:deploy("stone_b", 5, 2)
+local pushOk3 = updtr:requestStep(knight, 1, 0)
+assert(pushOk3, "push should succeed shoving a 2-pawn chain with open space beyond")
+assert(knight.col == 4 and knight.row == 2, "knight should have stepped into the tile the chain vacated")
+assert(s1.col == 5 and s2.col == 6, "both stones should have shifted forward one tile each, got " .. s1.col .. "," .. s2.col)
+print("push OK: knight at", knight.col, knight.row, "-- chain now at", s1.col, s2.col)
+dplyr:remove(s1.id); dplyr:remove(s2.id)
+
+-- ------------------------------------------------------ PUSH+ (MOVING)
+line("PUSH+ (MOVING) -- CAPPED AT 2 PAWNS")
+knight.movingAbility = "push_plus"
+dplyr:moveTo(knight.id, 3, 6) -- row 6 open cols 2-11, wall at col12
+local t1 = dplyr:deploy("stone_a", 4, 6)
+local t2 = dplyr:deploy("stone_b", 5, 6)
+local t3 = dplyr:deploy("stone_c", 6, 6)
+local pushPlusOk = updtr:requestStep(knight, 1, 0)
+assert(pushPlusOk == false, "push_plus should refuse a 3-pawn chain -- its cap is 2")
+assert(knight.col == 3, "knight should not have moved when the chain was too long")
+assert(t1.col == 4 and t2.col == 5 and t3.col == 6, "an over-cap chain should not shift at all")
+print("push_plus OK: 3-pawn chain correctly resisted (cap is 2)")
+
+dplyr:remove(t3.id) -- drop to exactly 2 -- now within push_plus's cap
+local pushPlusOk2 = updtr:requestStep(knight, 1, 0)
+assert(pushPlusOk2, "push_plus should succeed shoving exactly 2 pawns")
+assert(knight.col == 4, "knight should have stepped forward")
+assert(t1.col == 5 and t2.col == 6, "both stones should shift forward one tile each")
+print("push_plus OK: 2-pawn chain succeeded, knight now at", knight.col, knight.row)
+dplyr:remove(t1.id); dplyr:remove(t2.id)
+knight.movingAbility = "push" -- restore for later tests
+
+-- --------------------------------------------------------- SWAP (MOVING)
+line("SWAP (MOVING) -- WALL BLOCKS LINE OF SIGHT, FALLS BACK TO A STEP")
+dplyr:moveTo(knight.id, 3, 3) -- park knight elsewhere -- push_plus left it at (4,6), in this test's row
+dplyr:moveTo(mage.id, 2, 6) -- row 6 has a wall at col 12
+local farStone = dplyr:deploy("stone_a", 15, 6) -- beyond the wall
+local swapBlockedOk = updtr:requestStep(mage, 1, 0)
+assert(swapBlockedOk, "swap should fall back to a normal step when the line of sight is wall-blocked")
+assert(mage.col == 3 and mage.row == 6, "mage should have just stepped one tile, not swapped, got (" .. mage.col .. "," .. mage.row .. ")")
+assert(farStone.col == 15, "the far stone beyond the wall should not have moved")
+print("swap OK: wall correctly blocked line of sight, fell back to a normal step")
+dplyr:remove(farStone.id)
+
+line("SWAP (MOVING) -- UNLIMITED RANGE ON A CLEAR LINE")
+dplyr:moveTo(mage.id, 3, 2)
+local nearStone = dplyr:deploy("stone_b", 10, 2)
+local swapOk2 = updtr:requestStep(mage, 1, 0)
+assert(swapOk2, "swap should succeed finding a pawn on a clear line")
+assert(mage.col == 10 and mage.row == 2, "mage should have swapped all the way to the stone, got (" .. mage.col .. "," .. mage.row .. ")")
+assert(nearStone.col == 3 and nearStone.row == 2, "the stone should now be where mage started")
+print("swap OK: swapped across the whole clear row, mage now at", mage.col, mage.row)
+dplyr:remove(nearStone.id)
+
+-- -------------------------------------------------------- SWAP+ (MOVING)
+line("SWAP+ (MOVING) -- SEES STRAIGHT THROUGH WALLS")
+mage.movingAbility = "swap_plus"
+dplyr:moveTo(mage.id, 2, 6)
+local wallStone = dplyr:deploy("stone_c", 15, 6)
+local swapPlusOk = updtr:requestStep(mage, 1, 0)
+assert(swapPlusOk, "swap_plus should succeed even with a wall between mage and the target")
+assert(mage.col == 15 and mage.row == 6, "mage should have swapped straight through the wall, got (" .. mage.col .. "," .. mage.row .. ")")
+assert(wallStone.col == 2 and wallStone.row == 6, "the stone should now be at mage's old position")
+print("swap+ OK: swapped straight through a wall, mage now at", mage.col, mage.row)
+dplyr:remove(wallStone.id)
+mage.movingAbility = "swap_move" -- restore
+
+-- --------------------------------------------------------- PULL (MOVING)
+line("PULL (MOVING) -- SINGLE LINK")
+dplyr:moveTo(guardian.id, 5, 8) -- row 8 fully open
+local behind1 = dplyr:deploy("stone_a", 4, 8)
+local pullOk = updtr:requestStep(guardian, 1, 0)
+assert(pullOk, "pull should succeed: guardian steps forward normally")
+assert(guardian.col == 6 and guardian.row == 8, "guardian should have moved one tile east")
+assert(behind1.col == 5 and behind1.row == 8, "the pawn behind should be dragged into guardian's old tile")
+print("pull OK: guardian at", guardian.col, guardian.row, "-- dragged pawn now at", behind1.col, behind1.row)
+dplyr:remove(behind1.id)
+
+-- -------------------------------------------------------- PULL+ (MOVING)
+line("PULL+ (MOVING) -- WHOLE CHAIN SHUFFLES FORWARD")
+guardian.movingAbility = "pull_plus"
+dplyr:moveTo(guardian.id, 6, 9) -- row 9 open cols 2-13
+local link1 = dplyr:deploy("stone_a", 5, 9)
+local link2 = dplyr:deploy("stone_b", 4, 9)
+local link3 = dplyr:deploy("stone_c", 3, 9)
+local pullPlusOk = updtr:requestStep(guardian, 1, 0)
+assert(pullPlusOk, "pull_plus should succeed")
+assert(guardian.col == 7, "guardian should have moved one tile east")
+assert(link1.col == 6, "first link should shuffle into guardian's old tile, got " .. link1.col)
+assert(link2.col == 5, "second link should shuffle into the first link's old tile, got " .. link2.col)
+assert(link3.col == 4, "third link should shuffle into the second link's old tile, got " .. link3.col)
+print("pull+ OK: whole chain shuffled forward -- guardian", guardian.col, "link1", link1.col, "link2", link2.col, "link3", link3.col)
+dplyr:remove(link1.id); dplyr:remove(link2.id); dplyr:remove(link3.id)
+guardian.movingAbility = "pull" -- restore
+
+-- ------------------------------------------------------- LIGHTWEIGHT TRAIT
+line("LIGHTWEIGHT TRAIT -- CARRIED AN EXTRA TILE WHEN PUSHED")
+assert(dplyr:hasTrait(mage, "lightweight"), "mage should natively have the lightweight trait")
+dplyr:moveTo(knight.id, 3, 2) -- row 2: fully open, unlike row 3 which has sampleLevel's stones
+dplyr:moveTo(mage.id, 4, 2) -- directly east of knight, clear floor for 2 tiles beyond
+local pushLwOk = updtr:requestStep(knight, 1, 0)
+assert(pushLwOk, "push should succeed pushing the lightweight mage")
+assert(mage.col == 6 and mage.row == 2, "a lightweight pawn should be carried 2 tiles instead of 1, got (" .. mage.col .. "," .. mage.row .. ")")
+assert(knight.col == 4, "knight should have stepped into the tile mage vacated")
+print("lightweight OK: mage carried an extra tile to", mage.col, mage.row)
+
+-- ----------------------------------------------------------- STEALTH TRAIT
+line("STEALTH TRAIT -- GRANTED/REVOKED AT RUNTIME, SKIPS ENEMY AUTO-TARGETING")
+assert(not dplyr:hasTrait(knight, "stealth"), "knight should not have stealth natively")
+dplyr:moveTo(turret.id, 3, 4)
+dplyr:moveTo(knight.id, 10, 4)
+for c = 4, 9 do
+    local occ = dplyr:getAt(c, 4)
+    if occ and occ.id ~= turret.id and occ.id ~= knight.id then dplyr:remove(occ.id) end
+end
+local targetBefore = updtr:findBeamTarget(turret)
+assert(targetBefore and targetBefore.col == knight.col, "turret should be able to target knight before stealth is granted")
+dplyr:addTrait(knight.id, "stealth")
+assert(dplyr:hasTrait(knight, "stealth"), "addTrait should grant the trait")
+local targetDuring = updtr:findBeamTarget(turret)
+assert(targetDuring == nil, "a stealthed PC should be invisible to automatic enemy targeting")
+dplyr:removeTrait(knight.id, "stealth")
+assert(not dplyr:hasTrait(knight, "stealth"), "removeTrait should revoke the trait")
+local targetAfter = updtr:findBeamTarget(turret)
+assert(targetAfter and targetAfter.col == knight.col, "turret should be able to target knight again once stealth is revoked")
+print("stealth OK: enemy targeting correctly skipped knight while stealthed, and re-acquired it after")
+
+-- --------------------------------------------------------------- HISTORY
+line("HISTORY -- SNAPSHOT / UNDO / REDO / RESTART")
+local historyMng = require("modules.historyMng")
+local history = historyMng.new(map, dplyr, updtr)
+history.onPawnRecreated = function(pawn) con:registerSelectable(pawn) end
+
+dplyr:moveTo(knight.id, 3, 12) -- row 12 open cols 2-6, wall at col 7
+local baselineCol = knight.col
+history:snapshot() -- "step 1" -- this test's baseline
+
+assert(updtr:requestStep(knight, 1, 0), "setup step 1->2 should succeed")
+history:snapshot() -- "step 2"
+assert(knight.col == baselineCol + 1)
+
+assert(updtr:requestStep(knight, 1, 0), "setup step 2->3 should succeed")
+history:snapshot() -- "step 3"
+assert(knight.col == baselineCol + 2)
+
+assert(history:undo(), "undo should succeed")
+local k1 = dplyr:getById(knight.id) -- history rebuilds pawns -- always re-fetch after undo/redo/restart
+assert(k1.col == baselineCol + 1, "undo should restore the step-2 position, got " .. k1.col)
+print("undo OK: knight back at col", k1.col)
+
+assert(history:undo(), "second undo should succeed")
+local k2 = dplyr:getById(knight.id)
+assert(k2.col == baselineCol, "second undo should restore this test's baseline, got " .. k2.col)
+print("undo OK (again): knight back at col", k2.col)
+
+assert(history:undo() == false, "undo past the oldest snapshot should fail gracefully")
+print("undo correctly refused past the oldest snapshot")
+
+assert(history:redo(), "redo should succeed")
+local k3 = dplyr:getById(knight.id)
+assert(k3.col == baselineCol + 1, "redo should restore the step-2 position, got " .. k3.col)
+print("redo OK: knight forward to col", k3.col)
+
+-- branching: a new action after undoing should discard the old "future"
+assert(updtr:requestStep(k3, 0, 1), "branch move should succeed") -- row 13, col unchanged, is open floor
+history:snapshot()
+assert(history:redo() == false, "redo should be unavailable -- the old future was discarded by the new branch")
+print("branch correctly discarded the old redo future")
+
+assert(history:restart(), "restart should succeed")
+local k4 = dplyr:getById(knight.id)
+assert(k4.col == baselineCol and k4.row == 12, "restart should return to this test's very first snapshot, got (" .. k4.col .. "," .. k4.row .. ")")
+print("restart OK: knight back at (" .. k4.col .. "," .. k4.row .. ")")
+
+line("HISTORY -- A REMOVED PAWN REAPPEARS ON UNDO")
+local victim = dplyr:deploy("stone_a", 9, 13)
+local victimId = victim.id
+history:snapshot() -- "alive" checkpoint
+dplyr:remove(victimId)
+history:snapshot() -- "removed" checkpoint
+assert(dplyr:getById(victimId) == nil, "sanity check: stone should be gone right now")
+assert(history:undo(), "undo should succeed")
+local revived = dplyr:getById(victimId)
+assert(revived ~= nil, "the removed pawn should have reappeared after undo")
+assert(revived.col == 9 and revived.row == 13, "revived pawn should be back at its pre-removal position")
+print("history OK: removed pawn correctly reappeared at (" .. revived.col .. "," .. revived.row .. ") after undo")
 
 line("ALL SMOKE TESTS PASSED")

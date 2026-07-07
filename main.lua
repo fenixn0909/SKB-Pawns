@@ -1,9 +1,10 @@
 --[[
-    main.lua -- Order of the Sinking Star (mockup)
+    main.lua -- SKB Pawns (mockup)
 
-    Wires chessMap + pawnDplyr + pawnCon + abltMng + chessUpdtr together
-    into one playable demo scene. See modules/ for the actual systems --
-    this file is just the assembly + a minimal sidebar UI.
+    Wires chessMap + pawnDplyr + pawnCon + abltMng + chessUpdtr + camera +
+    traitMng + historyMng together into one playable demo scene. See
+    modules/ for the actual systems -- this file is just the assembly + a
+    thin sidebar UI.
 ]]
 
 display.setDefault("background", 0.05, 0.05, 0.07)
@@ -13,38 +14,67 @@ local pawnDplyr   = require("modules.pawnDplyr")
 local pawnCon     = require("modules.pawnCon")
 local abltMng     = require("modules.abltMng")
 local chessUpdtr  = require("modules.chessUpdtr")
+local camera      = require("modules.camera")
+local traitMng    = require("modules.traitMng")
+local historyMng  = require("modules.historyMng")
 local sampleLevel = require("data.sampleLevel")
 
 abltMng.registerDefaults()
+traitMng.registerDefaults()
 
 -- ------------------------------------------------------------------ TITLE
 local titleText = display.newText({
-    text = "ORDER OF THE SINKING STAR", x = display.contentCenterX, y = 18,
+    text = "SKB PAWNS", x = display.contentCenterX, y = 18,
     font = native.systemFontBold, fontSize = 20,
 })
 titleText:setFillColor(0.85, 0.85, 0.95)
 
 -- -------------------------------------------------------------- BOARD/MAP
-local BOARD_X, BOARD_Y = 10, 46
-local BOARD_W, BOARD_H = 1000, 654
+-- Sidebar is intentionally thin now (see UI section below) -- most of the
+-- screen goes to the board. Tile size is fixed (see chessMap.lua), so the
+-- map is no longer guaranteed to fit the viewport; modules/camera.lua
+-- pans a clipped viewport around it instead.
+local BOARD_X, BOARD_Y = 8, 40
+local SIDEBAR_W = 150
+local BOARD_W = display.contentWidth - BOARD_X - SIDEBAR_W - 16
+local BOARD_H = display.contentHeight - BOARD_Y - 10
+local SIDEBAR_X = BOARD_X + BOARD_W + 8
 
-local map = chessMap.new(sampleLevel.rows, {
-    originX = BOARD_X, originY = BOARD_Y,
-    availableWidth = BOARD_W, availableHeight = BOARD_H,
-})
+local map = chessMap.new(sampleLevel.rows, { tileSize = 48 })
 
-local mapGroup = display.newGroup()
-map:draw(mapGroup)
+-- Viewport container: clips to the board rect and sits at its center on
+-- screen. worldGroup is its only child -- everything board-related (tiles,
+-- the tap-catching rect, pawns) lives inside worldGroup, so panning it
+-- (worldGroup.x/y) is the entire camera implementation. See camera.lua's
+-- header comment for why the math is just worldGroup.x,y = -focusX,-focusY.
+local viewport = display.newContainer(BOARD_W, BOARD_H)
+viewport.x, viewport.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
 
--- invisible full-board rect that catches taps on empty tiles; pawns sit
--- above it in the display list so they intercept their own taps first
-local boardPixelW, boardPixelH = map.tileSize * map.cols, map.tileSize * map.rows
-local boardCenterX = map.originX + boardPixelW / 2
-local boardCenterY = map.originY + boardPixelH / 2
-local boardHit = display.newRect(boardCenterX, boardCenterY, boardPixelW, boardPixelH)
+local worldGroup = display.newGroup()
+viewport:insert(worldGroup)
+
+map:draw(worldGroup)
+
+-- invisible full-map-sized rect that catches taps on empty tiles; pawns
+-- sit above it in the display list so they intercept their own taps first
+local boardHit = display.newRect(map.pixelW / 2, map.pixelH / 2, map.pixelW, map.pixelH)
 boardHit:setFillColor(1, 1, 1, 0.01)
+worldGroup:insert(boardHit)
 
 local pawnGroup = display.newGroup()
+worldGroup:insert(pawnGroup)
+
+local cam = camera.new({
+    worldGroup = worldGroup,
+    worldW = map.pixelW, worldH = map.pixelH,
+    viewportW = BOARD_W, viewportH = BOARD_H,
+    panTime = 180,
+})
+
+local function focusCameraOnGrid(col, row, opts)
+    local wx, wy = map:gridToWorld(col, row)
+    cam:focusOn(wx, wy, opts)
+end
 
 -- ------------------------------------------------------------------ PAWNS
 local dplyr = pawnDplyr.new(map, pawnGroup)
@@ -62,77 +92,52 @@ for _, pawn in pairs(dplyr.pawns) do
 end
 
 -- ------------------------------------------------------------------- UI
-local SIDEBAR_X = BOARD_X + BOARD_W + 10
-local SIDEBAR_W = display.contentWidth - SIDEBAR_X - 10
+-- Thin sidebar: just status text now. Push/Swap/Pull are automatic
+-- (movingAbility), and Guard/End Turn/Undo/Redo/Restart are keyboard
+-- shortcuts (see the hotkeys line below and pawnCon's "g" handling) --
+-- there's nothing left that needs a big button strip blocking the board.
+local sidebarGroup = display.newGroup()
 
-local sidebarBg = display.newRect(SIDEBAR_X + SIDEBAR_W / 2, 46 + BOARD_H / 2, SIDEBAR_W, BOARD_H)
+local sidebarBg = display.newRect(sidebarGroup, SIDEBAR_X + SIDEBAR_W / 2, BOARD_Y + BOARD_H / 2, SIDEBAR_W, BOARD_H)
 sidebarBg:setFillColor(0.11, 0.11, 0.14)
 sidebarBg.strokeWidth = 1
 sidebarBg:setStrokeColor(0.3, 0.3, 0.35)
 
-local uiGroup = display.newGroup()
-local uiY = 30
-
-local function nextY(step) uiY = uiY + step; return uiY end
-
 local turnLabel = display.newText({
-    parent = uiGroup, text = "Turn: Player (Round 1)",
-    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 10, font = native.systemFontBold, fontSize = 16,
+    parent = sidebarGroup, text = "Turn: Player (Round 1)",
+    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 16, font = native.systemFontBold, fontSize = 14,
+    width = SIDEBAR_W - 16,
 })
 turnLabel:setFillColor(0.9, 0.85, 0.5)
 
 local selectedLabel = display.newText({
-    parent = uiGroup, text = "Selected: --",
-    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 40, font = native.systemFontBold, fontSize = 15,
-    width = SIDEBAR_W - 20,
+    parent = sidebarGroup, text = "Selected: --",
+    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 50, font = native.systemFontBold, fontSize = 13,
+    width = SIDEBAR_W - 16,
 })
 selectedLabel:setFillColor(1, 1, 1)
 
 local modeLabel = display.newText({
-    parent = uiGroup, text = "Mode: Move (tap a tile)",
-    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 66, font = native.systemFont, fontSize = 13,
-    width = SIDEBAR_W - 20,
+    parent = sidebarGroup, text = "Mode: Move",
+    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 84, font = native.systemFont, fontSize = 12,
+    width = SIDEBAR_W - 16,
 })
 modeLabel:setFillColor(0.6, 0.85, 1)
 
--- ability buttons: rebuilt every time selection changes
-local abilityButtons = {}
-local ABILITY_BUTTON_TOP = BOARD_Y + 100
-local ABILITY_BUTTON_H = 40
+local logText = display.newText({
+    parent = sidebarGroup, text = "",
+    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 90, font = native.systemFont, fontSize = 12,
+    width = SIDEBAR_W - 16,
+})
+logText:setFillColor(0.75, 0.9, 0.75)
 
-local function clearAbilityButtons()
-    for _, btn in ipairs(abilityButtons) do btn:removeSelf() end
-    abilityButtons = {}
-end
-
-local function makeButton(parent, x, y, w, h, label, onTap, fillColor)
-    local group = display.newGroup()
-    parent:insert(group)
-
-    local bg = display.newRoundedRect(group, x, y, w, h, 6)
-    bg:setFillColor(unpack(fillColor))
-    bg.strokeWidth = 1
-    bg:setStrokeColor(0.05, 0.05, 0.06)
-
-    local label_ = display.newText({ parent = group, text = label, x = x, y = y, font = native.systemFontBold, fontSize = 14 })
-    label_:setFillColor(1, 1, 1)
-
-    bg:addEventListener("tap", function() onTap(); return true end)
-    return group
-end
-
-local function refreshAbilityButtons(pawn)
-    clearAbilityButtons()
-    if not pawn then return end
-    local defs = abltMng.getAbilitiesForPawn(pawn)
-    local y = ABILITY_BUTTON_TOP
-    for _, def in ipairs(defs) do
-        local btn = makeButton(uiGroup, SIDEBAR_X + SIDEBAR_W / 2, y, SIDEBAR_W - 30, ABILITY_BUTTON_H,
-            def.name, function() con:beginAbility(def.id) end, { 0.20, 0.30, 0.45 })
-        table.insert(abilityButtons, btn)
-        y = y + ABILITY_BUTTON_H + 10
-    end
-end
+local hotkeysText = display.newText({
+    parent = sidebarGroup,
+    text = "Tab/1-9 switch\nArrows/tap move\nG guard  E end turn\n, undo  . redo\nR restart",
+    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 34, font = native.systemFont, fontSize = 11,
+    width = SIDEBAR_W - 16,
+})
+hotkeysText:setFillColor(0.6, 0.6, 0.66)
 
 local function updateSelectedLabel(pawn)
     if not pawn then
@@ -140,33 +145,85 @@ local function updateSelectedLabel(pawn)
         return
     end
     local hpText = pawn.hp and (pawn.hp .. "/" .. pawn.maxHp) or "--"
-    selectedLabel.text = string.format("Selected: %s (HP %s)", pawn.name, hpText)
+    selectedLabel.text = string.format("%s\nHP %s", pawn.name, hpText)
 end
 
--- End Turn button pinned near the bottom of the sidebar
-local endTurnBtn = makeButton(uiGroup, SIDEBAR_X + SIDEBAR_W / 2, BOARD_Y + BOARD_H - 70,
-    SIDEBAR_W - 30, 44, "End Turn", function() updtr:endTurn() end, { 0.45, 0.20, 0.20 })
-
-local logText = display.newText({
-    parent = uiGroup, text = "Tab / 1-9: switch pawn -- Esc: cancel ability",
-    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 25, font = native.systemFont, fontSize = 12,
-    width = SIDEBAR_W - 20,
+-- small show/hide toggle for the sidebar, pinned outside sidebarGroup so
+-- it stays put (and tappable) even while the sidebar itself is hidden
+local sidebarVisible = true
+local toggleBtn = display.newGroup()
+local TOGGLE_X, TOGGLE_Y = display.contentWidth - 20, 20
+local toggleBg = display.newRoundedRect(toggleBtn, TOGGLE_X, TOGGLE_Y, 28, 28, 6)
+toggleBg:setFillColor(0.2, 0.2, 0.26)
+toggleBg.strokeWidth = 1
+toggleBg:setStrokeColor(0.4, 0.4, 0.46)
+local toggleLabel = display.newText({
+    parent = toggleBtn, text = "»", x = TOGGLE_X, y = TOGGLE_Y, font = native.systemFontBold, fontSize = 16,
 })
-logText:setFillColor(0.7, 0.7, 0.75)
+toggleLabel:setFillColor(0.85, 0.85, 0.9)
+
+local function setSidebarVisible(visible)
+    sidebarVisible = visible
+    sidebarGroup.isVisible = visible
+    toggleLabel.text = visible and "»" or "«"
+end
+
+toggleBg:addEventListener("tap", function()
+    setSidebarVisible(not sidebarVisible)
+    return true
+end)
+
+-- --------------------------------------------------------------- HISTORY
+-- Full-state undo/redo/restart -- see modules/historyMng.lua. A snapshot
+-- is taken after every move/ability/completed round via
+-- updtr.onStateChanged; the very first snapshot (below, after this block)
+-- is the level's starting state, which Restart jumps back to.
+local history = historyMng.new(map, dplyr, updtr)
+
+history.onPawnRecreated = function(pawn)
+    con:registerSelectable(pawn)
+end
+
+history.onApplied = function()
+    local stillSelected = con.selectedId and dplyr:getById(con.selectedId)
+    if stillSelected then
+        con:select(con.selectedId)
+    else
+        local pcs = dplyr:getAllByFaction("pc")
+        table.sort(pcs, function(a, b) return a.id < b.id end)
+        if pcs[1] then con:select(pcs[1].id) end
+    end
+
+    local selPawn = con:getSelected()
+    if selPawn then focusCameraOnGrid(selPawn.col, selPawn.row, { instant = true }) end
+
+    local who = (updtr.turn == "pc") and "Player" or "Enemy"
+    turnLabel.text = string.format("Turn: %s (Round %d)", who, updtr.roundNumber)
+    logText.text = "History restored."
+end
+
+updtr.onStateChanged = function() history:snapshot() end
 
 -- --------------------------------------------------------------- EVENTS
 Runtime:addEventListener("pawnSelected", function(event)
     local pawn = dplyr:getById(event.pawnId)
     updateSelectedLabel(pawn)
-    refreshAbilityButtons(pawn)
+    if pawn then focusCameraOnGrid(pawn.col, pawn.row) end
+end)
+
+Runtime:addEventListener("pawnMoved", function(event)
+    if event.pawnId == con.selectedId then
+        focusCameraOnGrid(event.col, event.row)
+    end
+    updateSelectedLabel(con:getSelected())
 end)
 
 Runtime:addEventListener("controlModeChanged", function(event)
     if event.mode == "ability" then
         local def = abltMng.get(event.abilityId)
-        modeLabel.text = "Targeting: " .. def.name .. " -- tap a target (Esc cancels)"
+        modeLabel.text = "Targeting: " .. def.name .. " (Esc cancels)"
     else
-        modeLabel.text = "Mode: Move (tap a tile)"
+        modeLabel.text = "Mode: Move"
     end
 end)
 
@@ -177,7 +234,6 @@ end)
 
 Runtime:addEventListener("abilityResolved", function(event)
     logText.text = event.success and "Ability resolved." or "Ability failed / invalid target."
-    -- keep selected pawn's HP label in sync (abilities can change HP, e.g. beams)
     updateSelectedLabel(con:getSelected())
 end)
 
@@ -189,9 +245,34 @@ Runtime:addEventListener("levelFailed", function()
     logText.text = "ALL PCS LOST -- LEVEL FAILED"
 end)
 
+-- meta/app-level keys: end turn, undo/redo, restart -- separate from
+-- pawnCon's per-pawn input handling (movement, guard, selection)
+Runtime:addEventListener("key", function(event)
+    if event.phase ~= "down" then return false end
+    local key = event.keyName
+    if key == "e" then
+        updtr:endTurn()
+        return true
+    elseif key == "," or key == "comma" then
+        history:undo()
+        return true
+    elseif key == "." or key == "period" then
+        history:redo()
+        return true
+    elseif key == "r" then
+        history:restart()
+        return true
+    end
+    return false
+end)
+
 -- ------------------------------------------------------------- KICK OFF
 local firstPCs = dplyr:getAllByFaction("pc")
 table.sort(firstPCs, function(a, b) return a.id < b.id end)
 if firstPCs[1] then
+    focusCameraOnGrid(firstPCs[1].col, firstPCs[1].row, { instant = true })
     con:select(firstPCs[1].id)
 end
+
+-- level-start baseline snapshot -- Restart (R) jumps back to this
+history:snapshot()

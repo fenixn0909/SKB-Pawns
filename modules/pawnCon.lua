@@ -27,6 +27,7 @@ function pawnCon.new(dplyrRef, mapRef, updtrRef, boardHitRect)
     self.mode = pawnCon.MODE.MOVE
     self.pendingAbility = nil
     self.selectionRing = nil
+    self.boardHitRect = boardHitRect
 
     boardHitRect:addEventListener("tap", function(event)
         self:onBoardTap(event)
@@ -123,7 +124,14 @@ function pawnCon:onPawnTap(pawn)
 end
 
 function pawnCon:onBoardTap(event)
-    local col, row = self.map:worldToGrid(event.x, event.y)
+    -- The board can now be panned by modules/camera.lua, so a raw
+    -- event.x/y (always in screen/content space) no longer lines up with
+    -- chessMap's grid math directly. contentToLocal() converts through
+    -- every nested group transform (container clip + camera pan) back to
+    -- the board's own coordinate frame, which is exactly what
+    -- chessMap:worldToGrid expects.
+    local lx, ly = self.boardHitRect:contentToLocal(event.x, event.y)
+    local col, row = self.map:worldToGrid(lx, ly)
     if not self.map:isInBounds(col, row) then return end
 
     if self.mode == pawnCon.MODE.ABILITY and self.pendingAbility then
@@ -187,6 +195,19 @@ function pawnCon:onKeyEvent(event)
         self:setMode(pawnCon.MODE.MOVE)
         return true
     end
+
+    -- Guard is the one remaining click/key-activated (ACTIVE-trigger)
+    -- ability now that Push/Swap/Pull moved to movingAbility -- bound
+    -- straight to a key rather than a sidebar button.
+    if key == "g" then
+        local user = self:getSelected()
+        if user and self.updtr:hasAbility(user, "guard") and self.mode == pawnCon.MODE.MOVE then
+            local ok = self.updtr:useAbility(user, "guard", nil)
+            Runtime:dispatchEvent({ name = "abilityResolved", success = ok, abilityId = "guard" })
+        end
+        return true
+    end
+
     return false
 end
 
