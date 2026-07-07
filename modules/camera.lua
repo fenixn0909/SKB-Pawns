@@ -31,7 +31,7 @@ camera.__index = camera
 local ZOOM_MIN = 0.5
 local ZOOM_MAX = 3.0
 
--- opts: { worldGroup, worldW, worldH, viewportW, viewportH, panTime }
+-- opts: { worldGroup, worldW, worldH, viewportW, viewportH, boardCenterX, boardCenterY, panTime }
 function camera.new(opts)
     opts = opts or {}
     local self = setmetatable({}, camera)
@@ -40,11 +40,19 @@ function camera.new(opts)
     self.worldH = opts.worldH
     self.viewportW = opts.viewportW
     self.viewportH = opts.viewportH
+    self.centerX = opts.boardCenterX or 0
+    self.centerY = opts.boardCenterY or 0
     self.panTime = opts.panTime or 180
     self.focusX = self.worldW / 2
     self.focusY = self.worldH / 2
     self.zoom = 1
     return self
+end
+
+local function applyZoom(self)
+    local targetX = self.centerX - self.focusX * self.zoom
+    local targetY = self.centerY - self.focusY * self.zoom
+    self.worldGroup.x, self.worldGroup.y = targetX, targetY
 end
 
 local function clampAxis(desired, worldDim, viewportDim)
@@ -71,7 +79,7 @@ function camera:focusOn(worldX, worldY, opts)
     self.focusX = clampAxis(worldX, self.worldW, self.viewportW)
     self.focusY = clampAxis(worldY, self.worldH, self.viewportH)
 
-    local targetX, targetY = -self.focusX * self.zoom, -self.focusY * self.zoom
+    local targetX, targetY = self.centerX - self.focusX * self.zoom, self.centerY - self.focusY * self.zoom
     if opts.instant or not transition then
         self.worldGroup.x, self.worldGroup.y = targetX, targetY
     else

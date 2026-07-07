@@ -31,7 +31,7 @@ titleText:setFillColor(0.85, 0.85, 0.95)
 
 -- -------------------------------------------------------------- BOARD/MAP
 -- Tile size is computed so the entire map fits inside the board area.
--- No camera panning needed -- the map sits centered in the viewport.
+-- No camera panning needed -- the map sits centered in the board.
 local BOARD_X, BOARD_Y = 8, 40
 local SIDEBAR_W = 150
 local BOARD_W = display.contentWidth - BOARD_X - SIDEBAR_W - 16
@@ -44,19 +44,21 @@ local TILE_SIZE = math.floor(math.min(BOARD_W / NUM_COLS, BOARD_H / NUM_ROWS))
 
 local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE })
 
--- Viewport container: clips to the board rect and sits at its center on
--- screen. worldGroup holds everything board-related (tiles, tap rect, pawns).
-local viewport = display.newContainer(BOARD_W, BOARD_H)
-viewport.x, viewport.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
+-- Board background: fills the board area so any map underflow is clean.
+local boardBg = display.newRect(BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2, BOARD_W, BOARD_H)
+boardBg:setFillColor(0.05, 0.05, 0.07)
 
+-- worldGroup holds everything board-related (tiles, tap rect, pawns).
+-- It sits directly on stage; the sidebar and title overlay on top handle
+-- any right/top overflow. No container clipping needed.
 local worldGroup = display.newGroup()
-viewport:insert(worldGroup)
 
 map:draw(worldGroup)
 
 -- invisible full-map-sized rect that catches taps on empty tiles; pawns
 -- sit above it in the display list so they intercept their own taps first
-local boardHit = display.newRect(map.pixelW / 2, map.pixelH / 2, map.pixelW, map.pixelH)
+-- Positioned at (0,0) so boardHit:contentToLocal() returns map-world coords.
+local boardHit = display.newRect(0, 0, map.pixelW, map.pixelH)
 boardHit:setFillColor(1, 1, 1, 0.01)
 worldGroup:insert(boardHit)
 
@@ -67,6 +69,8 @@ local cam = camera.new({
     worldGroup = worldGroup,
     worldW = map.pixelW, worldH = map.pixelH,
     viewportW = BOARD_W, viewportH = BOARD_H,
+    boardCenterX = BOARD_X + BOARD_W / 2,
+    boardCenterY = BOARD_Y + BOARD_H / 2,
     panTime = 180,
 })
 
