@@ -132,7 +132,7 @@ logText:setFillColor(0.75, 0.9, 0.75)
 
 local hotkeysText = display.newText({
     parent = sidebarGroup,
-    text = "Tab/1-9 switch\nArrows/tap move\nG guard  E end turn\n, undo  . redo\nR restart",
+    text = "Tab/1-9 switch\nArrows/tap move\nG guard  E end turn\n, undo  . redo\nR restart\n+/- zoom",
     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 34, font = native.systemFont, fontSize = 11,
     width = SIDEBAR_W - 16,
 })
@@ -260,6 +260,12 @@ Runtime:addEventListener("key", function(event)
         return true
     elseif key == "r" then
         history:restart()
+        return true
+    elseif key == "+" or key == "=" then
+        cam:setZoom(cam:getZoom() * 1.25)
+        return true
+    elseif key == "-" or key == "_" then
+        cam:setZoom(cam:getZoom() / 1.25)
         return true
     end
     return false
