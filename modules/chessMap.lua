@@ -60,12 +60,11 @@ local DEFAULT_SINK_TURNS = 4
 -- levelRows: array of equal-length strings, one per map row, using LEGEND_CHARS
 -- opts: { tileSize, originX, originY, sinkTurns }
 --
--- Tile size is now FIXED (not scaled to fit an available viewport) -- the
--- world can be larger than the screen, and modules/camera.lua is what pans
--- a scrollable viewport around it. originX/originY default to 0 (the map's
--- own coordinate frame); a non-zero origin is still supported for anyone
--- drawing a map without a camera (e.g. a future minimap), but main.lua's
--- normal setup leaves them at 0 and lets the camera do all positioning.
+-- Tile size is computed by main.lua so the entire map fits inside the
+-- board area. originX/originY default to 0 (the map's own coordinate
+-- frame); a non-zero origin is still supported for anyone drawing a map
+-- without a camera (e.g. a future minimap), but main.lua's normal setup
+-- leaves them at 0.
 function chessMap.new(levelRows, opts)
     opts = opts or {}
     local self = setmetatable({}, chessMap)

@@ -30,23 +30,22 @@ local titleText = display.newText({
 titleText:setFillColor(0.85, 0.85, 0.95)
 
 -- -------------------------------------------------------------- BOARD/MAP
--- Sidebar is intentionally thin now (see UI section below) -- most of the
--- screen goes to the board. Tile size is fixed (see chessMap.lua), so the
--- map is no longer guaranteed to fit the viewport; modules/camera.lua
--- pans a clipped viewport around it instead.
+-- Tile size is computed so the entire map fits inside the board area.
+-- No camera panning needed -- the map sits centered in the viewport.
 local BOARD_X, BOARD_Y = 8, 40
 local SIDEBAR_W = 150
 local BOARD_W = display.contentWidth - BOARD_X - SIDEBAR_W - 16
 local BOARD_H = display.contentHeight - BOARD_Y - 10
 local SIDEBAR_X = BOARD_X + BOARD_W + 8
 
-local map = chessMap.new(sampleLevel.rows, { tileSize = 48 })
+local NUM_COLS = #sampleLevel.rows[1]
+local NUM_ROWS = #sampleLevel.rows
+local TILE_SIZE = math.floor(math.min(BOARD_W / NUM_COLS, BOARD_H / NUM_ROWS))
+
+local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE })
 
 -- Viewport container: clips to the board rect and sits at its center on
--- screen. worldGroup is its only child -- everything board-related (tiles,
--- the tap-catching rect, pawns) lives inside worldGroup, so panning it
--- (worldGroup.x/y) is the entire camera implementation. See camera.lua's
--- header comment for why the math is just worldGroup.x,y = -focusX,-focusY.
+-- screen. worldGroup holds everything board-related (tiles, tap rect, pawns).
 local viewport = display.newContainer(BOARD_W, BOARD_H)
 viewport.x, viewport.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
 
