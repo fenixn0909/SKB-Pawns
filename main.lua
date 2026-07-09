@@ -9,6 +9,9 @@
 
 display.setDefault("background", 0.05, 0.05, 0.07)
 
+require("_mcp_touch")  -- Auto-injected by MCP server
+require("_mcp_screenshot")  -- Auto-injected by MCP server
+require("_mcp_logger")  -- Auto-injected by MCP server
 local chessMap    = require("modules.chessMap")
 local pawnDplyr   = require("modules.pawnDplyr")
 local pawnCon     = require("modules.pawnCon")
@@ -42,7 +45,7 @@ local NUM_COLS = #sampleLevel.rows[1]
 local NUM_ROWS = #sampleLevel.rows
 local TILE_SIZE = math.floor(math.min(BOARD_W / NUM_COLS, BOARD_H / NUM_ROWS))
 
-local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE })
+local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE, tunnels = sampleLevel.tunnels })
 
 -- Board background: fills the board area so any map underflow is clean.
 local boardBg = display.newRect(BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2, BOARD_W, BOARD_H)
@@ -136,7 +139,7 @@ logText:setFillColor(0.75, 0.9, 0.75)
 
 local hotkeysText = display.newText({
     parent = sidebarGroup,
-    text = "Tab/1-9 switch\nArrows/tap move\nG guard  E end turn\n, undo  . redo\nR restart\n+/- zoom",
+    text = "Tab/Q/E/1-9 switch\nArrows/tap move\nG guard  Space end turn\n, undo  . redo\nR restart\n+/- zoom",
     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 34, font = native.systemFont, fontSize = 11,
     width = SIDEBAR_W - 16,
 })
@@ -253,7 +256,7 @@ end)
 Runtime:addEventListener("key", function(event)
     if event.phase ~= "down" then return false end
     local key = event.keyName
-    if key == "e" then
+    if key == "space" then
         updtr:endTurn()
         return true
     elseif key == "," or key == "comma" then

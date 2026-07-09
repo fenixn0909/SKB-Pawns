@@ -7,6 +7,8 @@
     input or ability rules -- see pawnCon.lua and abltMng.lua.
 ]]
 
+local chessMap = require("modules.chessMap")
+
 local pawnDplyr = {}
 pawnDplyr.__index = pawnDplyr
 
@@ -31,33 +33,122 @@ pawnDplyr.FACTION = {
 -- `subType`       -- free-form classification tag (e.g. "stone") for
 --                    kinds that share a faction/behavior family but aren't
 --                    worth a whole new faction of their own.
+-- `image`         -- single static sprite path. Used by non-facing pawns
+--                    (stones/crates/gears -- they never move under their
+--                    own power, so there's no facing to show).
+-- `images`         -- { down=, up=, left=, right= } directional sprite
+--                    paths. Used by every PC/enemy instead of `image` --
+--                    pawnDplyr swaps the displayed sprite to match
+--                    pawn.facing whenever it changes (see :_applySprite).
 pawnDplyr.KIND_INFO = {
     pc_knight = {
-        image = "images/pc_knight.png", faction = pawnDplyr.FACTION.PC,
+        images = {
+            down = "images/pc_knight_down.png", up = "images/pc_knight_up.png",
+            left = "images/pc_knight_left.png", right = "images/pc_knight_right.png",
+        },
+        faction = pawnDplyr.FACTION.PC,
         name = "Knight", hp = 6, abilities = {},
         movingAbility = "push", traits = {},
     },
     pc_mage = {
-        image = "images/pc_mage.png", faction = pawnDplyr.FACTION.PC,
+        images = {
+            down = "images/pc_mage_down.png", up = "images/pc_mage_up.png",
+            left = "images/pc_mage_left.png", right = "images/pc_mage_right.png",
+        },
+        faction = pawnDplyr.FACTION.PC,
         name = "Mage", hp = 4, abilities = {},
         movingAbility = "swap_move", traits = { "lightweight" },
     },
     pc_guardian = {
-        image = "images/pc_guardian.png", faction = pawnDplyr.FACTION.PC,
+        images = {
+            down = "images/pc_guardian_down.png", up = "images/pc_guardian_up.png",
+            left = "images/pc_guardian_left.png", right = "images/pc_guardian_right.png",
+        },
+        faction = pawnDplyr.FACTION.PC,
         name = "Guardian", hp = 8, abilities = { "guard" },
         movingAbility = "pull", traits = {},
     },
+    -- BRAWLER: Kick / Kick+ tester (see modules/abltMng.lua) -- after a
+    -- normal step, kicks whoever's in its new facing direction; they slide
+    -- until blocked by a wall or another pawn.
+    pc_brawler = {
+        images = {
+            down = "images/pc_brawler_down.png", up = "images/pc_brawler_up.png",
+            left = "images/pc_brawler_left.png", right = "images/pc_brawler_right.png",
+        },
+        faction = pawnDplyr.FACTION.PC,
+        name = "Brawler", hp = 5, abilities = {},
+        movingAbility = "kick", traits = {},
+    },
+    -- SLINGER: Throw tester -- after a normal step, throws whoever's
+    -- adjacent in its new facing direction 2 tiles (jumping over the 1st).
+    pc_slinger = {
+        images = {
+            down = "images/pc_slinger_down.png", up = "images/pc_slinger_up.png",
+            left = "images/pc_slinger_left.png", right = "images/pc_slinger_right.png",
+        },
+        faction = pawnDplyr.FACTION.PC,
+        name = "Slinger", hp = 4, abilities = {},
+        movingAbility = "throw", traits = {},
+    },
+    -- SCOUT: Tiny Size tester -- can pass through jail bars, wall holes,
+    -- and tunnels (which teleport it to the paired exit). Plain baseline
+    -- movement otherwise (no movingAbility).
+    pc_scout = {
+        images = {
+            down = "images/pc_scout_down.png", up = "images/pc_scout_up.png",
+            left = "images/pc_scout_left.png", right = "images/pc_scout_right.png",
+        },
+        faction = pawnDplyr.FACTION.PC,
+        name = "Scout", hp = 3, abilities = {},
+        traits = { "tiny_size" },
+    },
     enemy_brute = {
-        image = "images/enemy_brute.png", faction = pawnDplyr.FACTION.ENEMY,
+        images = {
+            down = "images/enemy_brute_down.png", up = "images/enemy_brute_up.png",
+            left = "images/enemy_brute_left.png", right = "images/enemy_brute_right.png",
+        },
+        faction = pawnDplyr.FACTION.ENEMY,
         name = "Brute", hp = 5, abilities = { "guard" }, traits = {},
     },
     enemy_turret = {
-        image = "images/enemy_turret.png", faction = pawnDplyr.FACTION.ENEMY,
+        images = {
+            down = "images/enemy_turret_down.png", up = "images/enemy_turret_up.png",
+            left = "images/enemy_turret_left.png", right = "images/enemy_turret_right.png",
+        },
+        faction = pawnDplyr.FACTION.ENEMY,
         name = "Turret", hp = 3, abilities = { "fire_beam" }, traits = {},
     },
     enemy_wraith = {
-        image = "images/enemy_wraith.png", faction = pawnDplyr.FACTION.ENEMY,
+        images = {
+            down = "images/enemy_wraith_down.png", up = "images/enemy_wraith_up.png",
+            left = "images/enemy_wraith_left.png", right = "images/enemy_wraith_right.png",
+        },
+        faction = pawnDplyr.FACTION.ENEMY,
         name = "Wraith", hp = 3, abilities = { "fire_beam" }, traits = {},
+    },
+    -- TREANT: stationary melee attacker -- every enemy turn, hits all 8
+    -- surrounding tiles (see abltMng's "treant_slam", aiPattern "melee8").
+    -- Armor / Protected / Parry all grant immunity.
+    enemy_treant = {
+        images = {
+            down = "images/enemy_treant_down.png", up = "images/enemy_treant_up.png",
+            left = "images/enemy_treant_left.png", right = "images/enemy_treant_right.png",
+        },
+        faction = pawnDplyr.FACTION.ENEMY,
+        name = "Treant", hp = 6, abilities = { "treant_slam" }, traits = {},
+    },
+    -- SPITTER: ranged single-target attacker -- every enemy turn, hits the
+    -- first non-stealthed PC in a clear line ("acid_spit", aiPattern
+    -- "beam_first" -- stops at the first hit, unlike Fire Beam's pierce).
+    -- Armor / Protected grant immunity (Parry does not -- it's melee-only).
+    enemy_spitter = {
+        images = {
+            down = "images/enemy_spitter_down.png", up = "images/enemy_spitter_up.png",
+            left = "images/enemy_spitter_left.png", right = "images/enemy_spitter_right.png",
+        },
+        faction = pawnDplyr.FACTION.ENEMY,
+        name = "Spitter", hp = 3, abilities = { "acid_spit" }, traits = {},
     },
     movable_crate = {
         image = "images/crate.png", faction = pawnDplyr.FACTION.NEUTRAL,
@@ -103,7 +194,7 @@ end
 
 local function occKey(col, row) return col .. "," .. row end
 
-local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end -- kept for anything using facing angles elsewhere
 
 -- default facing per faction for pawns that haven't moved yet -- lets Swap
 -- have a sensible target direction from the very first turn. Matches
@@ -113,6 +204,14 @@ local DEFAULT_FACING = {
     pc    = { 1, 0 },
     enemy = { -1, 0 },
 }
+
+local function directionFromFacing(dCol, dRow)
+    if dRow > 0 then return "down" end
+    if dRow < 0 then return "up" end
+    if dCol > 0 then return "right" end
+    if dCol < 0 then return "left" end
+    return "down"
+end
 
 -- shallow-copies a plain array of strings (used for KIND_INFO.traits so
 -- every deployed pawn gets its own independent trait set to mutate)
@@ -132,25 +231,34 @@ local function copyDict(d)
     return c
 end
 
--- Builds the container/sprite/HP-label/facing-indicator for a pawn table
--- that already has all its data fields set (id, kind, col, row, hp, ...).
--- Shared by :deploy() (fresh pawn) and :_recreateFromSnapshot() (restoring
--- a pawn from undo/redo/restart history) so the two can never drift apart.
+function pawnDplyr:_spritePathFor(info, pawn)
+    if info.images then
+        local dir = directionFromFacing(pawn.facing[1], pawn.facing[2])
+        return info.images[dir] or info.images.down
+    end
+    return info.image
+end
+
+-- Builds the container/sprite/HP-label for a pawn table that already has
+-- all its data fields set (id, kind, col, row, hp, facing, ...). Shared by
+-- :deploy() (fresh pawn) and :_recreateFromSnapshot() (restoring a pawn
+-- from undo/redo/restart history) so the two can never drift apart.
 function pawnDplyr:_buildVisuals(pawn, info)
     local x, y = self.map:gridToWorld(pawn.col, pawn.row)
     local size = self.map.tileSize
 
     -- Everything visual for this pawn lives in one container group,
-    -- positioned at the pawn's world location. Children (sprite, HP text,
-    -- selection ring, facing indicator) use LOCAL coordinates around
-    -- (0,0), so moving/animating the container moves all of them together
-    -- -- no separate per-part tweening needed.
+    -- positioned at the pawn's world location. Children (sprite, HP text)
+    -- use LOCAL coordinates around (0,0), so moving/animating the
+    -- container moves all of them together -- no separate per-part
+    -- tweening needed.
     local container = display.newGroup()
     self.layerGroup:insert(container)
     container.x, container.y = x, y
     pawn.container = container
+    pawn._kindInfo = info -- re-looked-up by :_applySprite whenever facing changes
 
-    local sprite = display.newImageRect(container, info.image, size * 0.86, size * 0.86)
+    local sprite = display.newImageRect(container, self:_spritePathFor(info, pawn), size * 0.86, size * 0.86)
     sprite.x, sprite.y = 0, 0
     pawn.sprite = sprite
 
@@ -158,11 +266,44 @@ function pawnDplyr:_buildVisuals(pawn, info)
     if pawn.hp then
         local hpText = display.newText({
             parent = container, text = tostring(pawn.hp),
-            x = size * 0.30, y = -size * 0.30, font = native.systemFontBold, fontSize = 14,
+            x = size * 0.20, y = -size * 0.20, font = native.systemFontBold, fontSize = math.max(8, math.floor(size * 0.5)),
         })
         hpText:setFillColor(1, 1, 1)
         pawn.hpText = hpText
     end
+end
+
+-- ----------------------------------------------------------------- DEPLOY
+-- kind: key into KIND_INFO. opts: { faction override, hp override }
+function pawnDplyr:deploy(kind, col, row, opts)
+    opts = opts or {}
+    local info = pawnDplyr.KIND_INFO[kind]
+    assert(info, "pawnDplyr: unknown kind '" .. tostring(kind) .. "'")
+
+    local id = self.nextId
+    self.nextId = self.nextId + 1
+
+    local faction = opts.faction or info.faction
+
+    local pawn = {
+        id = id,
+        kind = kind,
+        subType = info.subType,
+        name = info.name,
+        faction = faction,
+        hp = opts.hp or info.hp,
+        maxHp = opts.hp or info.hp,
+        abilities = info.abilities,
+        movingAbility = info.movingAbility,
+        traits = copyTraitSet(info.traits),
+        col = col,
+        row = row,
+        isMovableOnly = info.isMovableOnly or info.isMechanism,
+        statuses = {}, -- e.g. statuses.guarded = turnsRemaining; see chessUpdtr for buff/debuff shapes
+        facing = DEFAULT_FACING[faction] or { 0, 1 },
+    }
+
+    self:_buildVisuals(pawn, info)
 
     -- facing indicator: a small triangle on a rotating sub-group so pawns
     -- with a facing-dependent ability (Swap) can actually be aimed by eye.
@@ -283,20 +424,30 @@ function pawnDplyr:removeTrait(pawnId, traitId)
 end
 
 -- ------------------------------------------------------------------ FACING
-function pawnDplyr:_applyFacingRotation(pawn)
-    if not pawn.facingIndicator then return end
-    local dCol, dRow = pawn.facing[1], pawn.facing[2]
-    pawn.facingIndicator.rotation = math.deg(atan2(dRow, dCol))
+-- Swaps the displayed sprite to match a directional pawn's current facing
+-- (down/up/left/right). No-op for non-directional kinds (stones/crates/
+-- gears use a single static `image` and have no `images` table).
+function pawnDplyr:_applySprite(pawn)
+    local info = pawn._kindInfo
+    if not info or not info.images then return end
+    local size = self.map.tileSize
+    local path = self:_spritePathFor(info, pawn)
+    if pawn.sprite then pawn.sprite:removeSelf() end
+    local sprite = display.newImageRect(pawn.container, path, size * 0.86, size * 0.86)
+    sprite.x, sprite.y = 0, 0
+    pawn.container:insert(1, sprite) -- keep it behind the HP label
+    pawn.sprite = sprite
 end
 
 -- Sets which way a pawn is looking (used by facing-dependent abilities
--- like Swap) and keeps its visual indicator in sync. dCol/dRow should be a
--- unit cardinal direction, e.g. (1,0) for east.
+-- like Swap, and by Kick/Throw's "after move" direction) and keeps its
+-- sprite in sync. dCol/dRow should be a unit cardinal direction, e.g.
+-- (1,0) for east.
 function pawnDplyr:setFacing(pawnId, dCol, dRow)
     local pawn = self.pawns[pawnId]
     if not pawn then return end
     pawn.facing = { dCol, dRow }
-    self:_applyFacingRotation(pawn)
+    self:_applySprite(pawn)
 end
 
 function pawnDplyr:remove(pawnId)
@@ -341,6 +492,23 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
     self.occupancy[occKey(pawn.col, pawn.row)] = nil
     pawn.col, pawn.row = col, row
     self.occupancy[occKey(col, row)] = pawnId
+
+    -- Tunnel teleport: only a Tiny Size pawn can ever legally land here at
+    -- all (see chessMap:isWalkable), so no extra trait check is needed --
+    -- if it's on a paired tunnel tile, hop straight to the other end. This
+    -- lives here (moveTo) rather than in requestStep because EVERY kind of
+    -- relocation -- baseline step, push, pull, swap, kick, throw -- funnels
+    -- through this one function.
+    local tile = self.map:getTile(col, row)
+    if tile and tile.type == chessMap.TILE.TUNNEL then
+        local exitCol, exitRow = self.map:getTunnelExit(col, row)
+        if exitCol and not self:isOccupied(exitCol, exitRow) then
+            self.occupancy[occKey(col, row)] = nil
+            pawn.col, pawn.row = exitCol, exitRow
+            self.occupancy[occKey(exitCol, exitRow)] = pawnId
+            col, row = exitCol, exitRow
+        end
+    end
 
     local x, y = self.map:gridToWorld(col, row)
     local duration = opts.duration or 160

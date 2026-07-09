@@ -36,6 +36,78 @@ end
 function chessUpdtr:buildCtx()
     local map, dplyr = self.map, self.dplyr
 
+    -- Kills a pawn through whichever channel is correct for it: HP-bearing
+    -- pawns go through applyDamage (so the removal path stays uniform with
+    -- ordinary combat), HP-less pawns (stones, crates) are just removed.
+    -- Used by the jump-landing resolution table below.
+    local function killPawn(pawnId)
+        local p = dplyr:getById(pawnId)
+        if not p then return end
+        if p.hp then
+            dplyr:applyDamage(pawnId, p.hp)
+        else
+            dplyr:remove(pawnId)
+        end
+    end
+
+    local function isArmored(p)
+        return dplyr:hasTrait(p, "armor") or dplyr:hasTrait(p, "protected")
+    end
+
+    -- The jump-landing resolution table (see Throw, below). jmpPawn has
+    -- just tried to land on (landCol,landRow) while traveling (dCol,dRow);
+    -- bedPawn is whoever's already standing there, if anyone:
+    --   a. jmpPawn Armored/Protected             -> bedPawn dies, jmpPawn lands
+    --   b. bedPawn Spike-Headed (jmpPawn isn't a) -> jmpPawn dies
+    --   c. neither of the above, jmpPawn isn't
+    --      Lightweight either                    -> both die
+    --   d. jmpPawn Lightweight (neither a nor b)  -> taps bedPawn, keeps
+    --      jumping to the next grid onward (recurses); dies if that's a wall
+    local function resolveJumpLanding(jmpPawn, landCol, landRow, dCol, dRow)
+        local bedPawn = dplyr:getAt(landCol, landRow)
+        if not bedPawn then
+            dplyr:moveTo(jmpPawn.id, landCol, landRow)
+            return
+        end
+
+        if isArmored(jmpPawn) then
+            killPawn(bedPawn.id)
+            dplyr:moveTo(jmpPawn.id, landCol, landRow)
+            return
+        end
+
+        if dplyr:hasTrait(bedPawn, "spike_headed") then
+            killPawn(jmpPawn.id)
+            return
+        end
+
+        if dplyr:hasTrait(jmpPawn, "lightweight") then
+            local nextCol, nextRow = landCol + dCol, landRow + dRow
+            if not map:isWalkable(nextCol, nextRow, jmpPawn) then
+                killPawn(jmpPawn.id) -- hit a wall while bouncing onward
+                return
+            end
+            resolveJumpLanding(jmpPawn, nextCol, nextRow, dCol, dRow)
+            return
+        end
+
+        killPawn(bedPawn.id)
+        killPawn(jmpPawn.id)
+    end
+
+    local function kickSlide(pawn, dCol, dRow)
+        local c, r = pawn.col, pawn.row
+        while true do
+            local nc, nr = c + dCol, r + dRow
+            if not map:isWalkable(nc, nr, pawn) then break end
+            if dplyr:isOccupied(nc, nr) then break end
+            c, r = nc, nr
+        end
+        if c ~= pawn.col or r ~= pawn.row then
+            dplyr:moveTo(pawn.id, c, r) -- no setFacing -- a kicked pawn's own facing never changes
+        end
+    end
+
     self.ctx = {
         getAt = function(col, row) return dplyr:getAt(col, row) end,
 
@@ -89,12 +161,58 @@ function chessUpdtr:buildCtx()
             return { affectedIds = affected }
         end,
 
+        -- Like traceBeam, but stops at (and only affects) the first pawn
+        -- reached -- a discrete projectile rather than a piercing beam.
+        -- immuneTraits: if the first pawn hit has any of these, it takes
+        -- no damage (the shot still stops there either way -- it hit
+        -- *something*, immunity doesn't make it pass through).
+        traceBeamFirst = function(user, dCol, dRow, damage, immuneTraits)
+            local c, r = user.col + dCol, user.row + dRow
+            while map:isInBounds(c, r) and not map:isBlocking(c, r) do
+                local pawn = dplyr:getAt(c, r)
+                if pawn then
+                    for _, t in ipairs(immuneTraits or {}) do
+                        if dplyr:hasTrait(pawn, t) then return { affectedIds = {} } end
+                    end
+                    dplyr:applyDamage(pawn.id, damage)
+                    return { affectedIds = { pawn.id } }
+                end
+                c, r = c + dCol, r + dRow
+            end
+            return { affectedIds = {} }
+        end,
+
+        -- Damages every PC in the 8 tiles surrounding `user` (Treant Slam).
+        -- immuneTraits: any PC with one of these takes no damage.
+        meleeSlam8 = function(user, damage, immuneTraits)
+            local dirs = { {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} }
+            local affected = {}
+            for _, d in ipairs(dirs) do
+                local p = dplyr:getAt(user.col + d[1], user.row + d[2])
+                if p and p.faction == "pc" then
+                    local immune = false
+                    for _, t in ipairs(immuneTraits or {}) do
+                        if dplyr:hasTrait(p, t) then immune = true break end
+                    end
+                    if not immune then
+                        dplyr:applyDamage(p.id, damage)
+                        table.insert(affected, p.id)
+                    end
+                end
+            end
+            return { affectedIds = affected }
+        end,
+
         setStatus = function(pawnId, name, turns)
             local pawn = dplyr:getById(pawnId)
             if pawn then pawn.statuses[name] = turns end
         end,
 
-        isWalkable = function(col, row) return map:isWalkable(col, row) end,
+        -- pawn is optional -- pass the mover so a Tiny Size pawn can path
+        -- through jail bars/wall holes/tunnels; omit it for "blocked for
+        -- everyone" checks (e.g. testing a chain's landing tile, where the
+        -- chain members may have different traits than whoever's asking).
+        isWalkable = function(col, row, pawn) return map:isWalkable(col, row, pawn) end,
 
         -- Unconditional relocation -- used where the caller has already
         -- established the destination is safe (e.g. a tile a pawn just
@@ -105,10 +223,11 @@ function chessUpdtr:buildCtx()
 
         -- Baseline "walk one tile" as a reusable primitive -- both the
         -- default (no movingAbility) path and several MOVING abilities'
-        -- fallback behavior share this exact rule.
+        -- fallback behavior share this exact rule. Passes `pawn` through to
+        -- isWalkable so a Tiny Size pawn can step onto jail/hole/tunnel tiles.
         stepIfClear = function(pawn, dCol, dRow)
             local nc, nr = pawn.col + dCol, pawn.row + dRow
-            if map:isWalkable(nc, nr) and not dplyr:isOccupied(nc, nr) then
+            if map:isWalkable(nc, nr, pawn) and not dplyr:isOccupied(nc, nr) then
                 dplyr:moveTo(pawn.id, nc, nr)
                 return true
             end
@@ -214,6 +333,43 @@ function chessUpdtr:buildCtx()
                 end
             end
             return draggedIds
+        end,
+
+        -- Kicks the pawn chain starting at (startCol,startRow) going
+        -- (dCol,dRow): if allowChain is false, only the first pawn found
+        -- is kicked (Kick); if true, every contiguous pawn in the line is
+        -- (Kick+), farthest first so nobody transiently overlaps. Each
+        -- kicked pawn slides via kickSlide (unlimited distance, no facing
+        -- change). Returns the array of pawns that were kicked.
+        kickChain = function(startCol, startRow, dCol, dRow, allowChain)
+            local chain = {}
+            local c, r = startCol, startRow
+            while true do
+                local p = dplyr:getAt(c, r)
+                if not p then break end
+                table.insert(chain, p)
+                if not allowChain then break end
+                c, r = c + dCol, r + dRow
+            end
+            for i = #chain, 1, -1 do
+                kickSlide(chain[i], dCol, dRow)
+            end
+            return chain
+        end,
+
+        -- Throws `thrownPawn` in direction (dCol,dRow): it jumps over the
+        -- immediately adjacent tile (ignoring any pawn there, but not a
+        -- wall) and lands 2 tiles away, resolved via resolveJumpLanding
+        -- above. Returns {ok=false} without moving anything if either tile
+        -- along the way is a wall.
+        throwPawn = function(thrownPawn, dCol, dRow)
+            local x1c, x1r = thrownPawn.col + dCol, thrownPawn.row + dRow
+            local x2c, x2r = thrownPawn.col + 2 * dCol, thrownPawn.row + 2 * dRow
+            if not map:isWalkable(x1c, x1r, thrownPawn) or not map:isWalkable(x2c, x2r, thrownPawn) then
+                return { ok = false, reason = "throw blocked by a wall" }
+            end
+            resolveJumpLanding(thrownPawn, x2c, x2r, dCol, dRow)
+            return { ok = true }
         end,
     }
 end
@@ -321,15 +477,24 @@ function chessUpdtr:endTurn()
     Runtime:dispatchEvent({ name = "turnChanged", turn = self.turn, round = self.roundNumber })
 end
 
--- Deliberately simple: each enemy fires its beam at the nearest PC sharing
--- its row or column with a clear line, otherwise it holds position.
+-- Each enemy checks every ability it has for an aiPattern (see
+-- abltMng.TRIGGER's doc comment) and fires accordingly: "melee8" always
+-- fires (no targeting needed), "beam_pierce"/"beam_first" only fire if
+-- findBeamTarget finds a clear line to a PC.
 function chessUpdtr:runEnemyPhase()
     local enemies = self.dplyr:getAllByFaction("enemy")
     for _, enemy in ipairs(enemies) do
         if enemy.hp and enemy.hp > 0 then
-            local firedAt = self:findBeamTarget(enemy)
-            if firedAt and self:hasAbility(enemy, "fire_beam") then
-                self:useAbility(enemy, "fire_beam", firedAt)
+            for _, abilityId in ipairs(enemy.abilities or {}) do
+                local def = abltMng.get(abilityId)
+                if def and def.aiPattern == "melee8" then
+                    self:useAbility(enemy, abilityId, nil)
+                elseif def and (def.aiPattern == "beam_pierce" or def.aiPattern == "beam_first") then
+                    local firedAt = self:findBeamTarget(enemy)
+                    if firedAt then
+                        self:useAbility(enemy, abilityId, firedAt)
+                    end
+                end
             end
         end
     end

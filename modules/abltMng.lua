@@ -52,6 +52,16 @@ abltMng.TRIGGER = {
     FLOW    = "flow",
 }
 
+-- Optional, enemy-only: how chessUpdtr's automatic enemy AI phase decides
+-- whether/how to fire an ACTIVE ability without a player picking a target.
+--   "beam_pierce" -- fire_beam's pattern: aim at any PC sharing a clear
+--                    row/column, damage runs through everyone on the line.
+--   "beam_first"  -- acid_spit's pattern: same aiming, but the shot stops
+--                    at (and only affects) the first pawn it reaches.
+--   "melee8"      -- treant_slam's pattern: no aiming/targeting at all --
+--                    fires every enemy turn regardless, hitting all 8
+--                    surrounding tiles at once.
+
 local registry = {}
 
 function abltMng.register(def)
@@ -151,6 +161,7 @@ function abltMng.registerDefaults()
         description = "Damage everything in a straight line until a wall.",
         targeting = abltMng.TARGETING.DIRECTION_TILE,
         trigger = abltMng.TRIGGER.ACTIVE,
+        aiPattern = "beam_pierce",
         apCost = 1,
         execute = function(user, targetTile, ctx)
             local dc = targetTile.col - user.col
@@ -165,6 +176,51 @@ function abltMng.registerDefaults()
             end
             if dc == 0 and dr == 0 then return { affectedIds = {} } end
             return ctx.traceBeam(user, dc, dr, 2) -- 2 damage per hit
+        end,
+    })
+
+    -- TREANT SLAM: hits every PC in the 8 surrounding tiles (including
+    -- diagonals) -- fires automatically every enemy turn regardless of
+    -- position (see aiPattern "melee8"). Armor, Protected, and Parry all
+    -- grant immunity.
+    abltMng.register({
+        id = "treant_slam",
+        name = "Treant Slam",
+        description = "Damages every PC in the 8 surrounding tiles. Armor, Protected, and Parry all grant immunity.",
+        targeting = abltMng.TARGETING.NONE,
+        trigger = abltMng.TRIGGER.ACTIVE,
+        aiPattern = "melee8",
+        apCost = 1,
+        execute = function(user, _target, ctx)
+            return ctx.meleeSlam8(user, 2, { "armor", "protected", "parry" })
+        end,
+    })
+
+    -- ACID SPIT: like Fire Beam's aiming (any PC sharing a clear
+    -- row/column), but the shot stops at -- and only affects -- the first
+    -- pawn it reaches, rather than piercing the whole line (see aiPattern
+    -- "beam_first"). Armor and Protected grant immunity (Parry does not --
+    -- it's a melee-only defense).
+    abltMng.register({
+        id = "acid_spit",
+        name = "Acid Spit",
+        description = "Damages the first non-immune pawn in a clear line. Armor and Protected grant immunity.",
+        targeting = abltMng.TARGETING.DIRECTION_TILE,
+        trigger = abltMng.TRIGGER.ACTIVE,
+        aiPattern = "beam_first",
+        apCost = 1,
+        execute = function(user, targetTile, ctx)
+            local dc = targetTile.col - user.col
+            local dr = targetTile.row - user.row
+            if math.abs(dc) >= math.abs(dr) then
+                dc = (dc > 0) and 1 or (dc < 0 and -1 or 0)
+                dr = 0
+            else
+                dr = (dr > 0) and 1 or (dr < 0 and -1 or 0)
+                dc = 0
+            end
+            if dc == 0 and dr == 0 then return { affectedIds = {} } end
+            return ctx.traceBeamFirst(user, dc, dr, 2, { "armor", "protected" })
         end,
     })
 
@@ -203,7 +259,7 @@ function abltMng.registerDefaults()
         execute = function(user, moveVec, ctx)
             local dCol, dRow = moveVec.dCol, moveVec.dRow
             local nc, nr = user.col + dCol, user.row + dRow
-            if not ctx.isWalkable(nc, nr) then return { ok = false, reason = "blocked" } end
+            if not ctx.isWalkable(nc, nr, user) then return { ok = false, reason = "blocked" } end
             if not ctx.getAt(nc, nr) then
                 ctx.relocate(user.id, nc, nr)
                 return { ok = true }
@@ -225,7 +281,7 @@ function abltMng.registerDefaults()
         execute = function(user, moveVec, ctx)
             local dCol, dRow = moveVec.dCol, moveVec.dRow
             local nc, nr = user.col + dCol, user.row + dRow
-            if not ctx.isWalkable(nc, nr) then return { ok = false, reason = "blocked" } end
+            if not ctx.isWalkable(nc, nr, user) then return { ok = false, reason = "blocked" } end
             if not ctx.getAt(nc, nr) then
                 ctx.relocate(user.id, nc, nr)
                 return { ok = true }
@@ -301,6 +357,73 @@ function abltMng.registerDefaults()
             if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
             local dragged = ctx.dragBehindChain(user, dCol, dRow, oldCol, oldRow, true)
             return { ok = true, affectedIds = dragged }
+        end,
+    })
+
+    -- KICK (Moving): step forward normally, then whoever's now in your
+    -- facing direction gets kicked -- they slide until blocked by a wall
+    -- or another pawn (unlimited distance). The kicked pawn's own facing
+    -- never changes.
+    abltMng.register({
+        id = "kick",
+        name = "Kick (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Step forward normally; the pawn now in your facing direction is kicked and slides until blocked. Its facing doesn't change.",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+            local nc, nr = user.col + dCol, user.row + dRow
+            local kicked = {}
+            if ctx.getAt(nc, nr) then
+                kicked = ctx.kickChain(nc, nr, dCol, dRow, false)
+            end
+            local ids = {}
+            for _, p in ipairs(kicked) do table.insert(ids, p.id) end
+            return { ok = true, affectedIds = ids }
+        end,
+    })
+
+    -- KICK+ (Moving): same, but kicks every pawn lined up in your facing
+    -- direction, not just the first -- each slides independently, farthest
+    -- one first so nobody transiently overlaps mid-resolution.
+    abltMng.register({
+        id = "kick_plus",
+        name = "Kick+ (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Like Kick, but kicks every pawn lined up in your facing direction, not just the first.",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+            local nc, nr = user.col + dCol, user.row + dRow
+            local kicked = {}
+            if ctx.getAt(nc, nr) then
+                kicked = ctx.kickChain(nc, nr, dCol, dRow, true)
+            end
+            local ids = {}
+            for _, p in ipairs(kicked) do table.insert(ids, p.id) end
+            return { ok = true, affectedIds = ids }
+        end,
+    })
+
+    -- THROW (Moving): step forward normally, then the pawn now adjacent in
+    -- your facing direction is thrown -- it jumps over the 1st grid beyond
+    -- it (ignoring any pawn there, but not a wall) and lands on the 2nd.
+    -- If it lands on an occupied tile, see chessUpdtr's
+    -- resolveJumpLanding (Armor/Protected/Spike-Headed/Lightweight
+    -- interactions).
+    abltMng.register({
+        id = "throw",
+        name = "Throw (Moving)",
+        trigger = abltMng.TRIGGER.MOVING,
+        description = "Step forward normally; the pawn now adjacent in your facing direction is thrown 2 tiles (jumping over the 1st, landing on the 2nd).",
+        execute = function(user, moveVec, ctx)
+            local dCol, dRow = moveVec.dCol, moveVec.dRow
+            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+            local target = ctx.getAt(user.col + dCol, user.row + dRow)
+            if not target then return { ok = true } end -- moved, nothing there to throw
+            local result = ctx.throwPawn(target, dCol, dRow)
+            if result.ok == false then return { ok = true, reason = result.reason } end -- the move itself still succeeded
+            return { ok = true, affectedIds = { target.id } }
         end,
     })
 end

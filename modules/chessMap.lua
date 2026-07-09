@@ -21,6 +21,9 @@ chessMap.TILE = {
     GOAL         = "goal",        -- clear condition tile
     HAZARD       = "hazard",      -- sinking tile: counts down, then becomes VOID
     VOID         = "void",        -- fully sunk -- impassable, no return
+    JAIL         = "jail",        -- bars: blocks everyone except a Tiny Size pawn
+    WALL_HOLE    = "wall_hole",   -- a wall with a tiny hole under it: same rule as JAIL
+    TUNNEL       = "tunnel",      -- Tiny-only; paired by id (see opts.tunnels), teleports on entry
 }
 
 -- ASCII legend used by level data files (see data/sampleLevel.lua)
@@ -32,6 +35,9 @@ chessMap.LEGEND_CHARS = {
     ["M"] = chessMap.TILE.MECHANISM,
     ["G"] = chessMap.TILE.GOAL,
     ["~"] = chessMap.TILE.HAZARD,
+    ["J"] = chessMap.TILE.JAIL,
+    ["H"] = chessMap.TILE.WALL_HOLE,
+    ["T"] = chessMap.TILE.TUNNEL,
 }
 
 local TILE_COLORS = {
@@ -43,6 +49,9 @@ local TILE_COLORS = {
     [chessMap.TILE.GOAL]        = { 0.22, 0.20, 0.08 },
     [chessMap.TILE.HAZARD]      = { 0.10, 0.16, 0.24 },
     [chessMap.TILE.VOID]        = { 0.03, 0.03, 0.04 },
+    [chessMap.TILE.JAIL]        = { 0.16, 0.17, 0.20 },
+    [chessMap.TILE.WALL_HOLE]   = { 0.10, 0.10, 0.12 },
+    [chessMap.TILE.TUNNEL]      = { 0.18, 0.12, 0.22 },
 }
 
 -- terrain types that get an overlay sprite drawn on top of the floor color
@@ -51,6 +60,17 @@ local TILE_OVERLAY_IMAGE = {
     [chessMap.TILE.MECHANISM] = "images/mechanism_gear.png",
     [chessMap.TILE.GOAL]      = "images/goal_star.png",
     [chessMap.TILE.HAZARD]    = "images/hazard_sink.png",
+    [chessMap.TILE.JAIL]      = "images/jail_bars.png",
+    [chessMap.TILE.WALL_HOLE] = "images/wall_hole.png",
+    [chessMap.TILE.TUNNEL]    = "images/tunnel.png",
+}
+
+-- tile types only a Tiny Size pawn can enter -- everyone else is blocked
+-- as if it were a wall. See :isWalkable.
+local TINY_ONLY_TILES = {
+    [chessMap.TILE.JAIL]      = true,
+    [chessMap.TILE.WALL_HOLE] = true,
+    [chessMap.TILE.TUNNEL]    = true,
 }
 
 -- default number of turns a HAZARD tile survives before sinking to VOID
@@ -60,11 +80,12 @@ local DEFAULT_SINK_TURNS = 4
 -- levelRows: array of equal-length strings, one per map row, using LEGEND_CHARS
 -- opts: { tileSize, originX, originY, sinkTurns }
 --
--- Tile size is computed by main.lua so the entire map fits inside the
--- board area. originX/originY default to 0 (the map's own coordinate
--- frame); a non-zero origin is still supported for anyone drawing a map
--- without a camera (e.g. a future minimap), but main.lua's normal setup
--- leaves them at 0.
+-- Tile size is computed by main.lua (it fits the whole map inside the
+-- board area, with zoom available on top -- see modules/camera.lua) and
+-- passed in via opts.tileSize. originX/originY default to 0 (the map's
+-- own coordinate frame); a non-zero origin is still supported for anyone
+-- drawing a map without a camera (e.g. a future minimap), but main.lua's
+-- normal setup leaves them at 0.
 function chessMap.new(levelRows, opts)
     opts = opts or {}
     local self = setmetatable({}, chessMap)
@@ -81,11 +102,12 @@ function chessMap.new(levelRows, opts)
 
     self.sinkTurns = opts.sinkTurns or DEFAULT_SINK_TURNS
 
-    self.tiles = {}       -- tiles[row][col] = { type = TILE.xxx, sinkTimer = n|nil }
+    self.tiles = {}       -- tiles[row][col] = { type = TILE.xxx, sinkTimer = n|nil, tunnelId = id|nil }
     self.spawnPCs = {}     -- ordered list of {col,row}
     self.spawnEnemies = {} -- ordered list of {col,row}
     self.goalTiles = {}
     self.mechanismTiles = {}
+    self.tunnelsById = {}  -- id -> array of {col,row} (normally exactly 2 -- an entrance and its exit)
 
     for r = 1, self.rows do
         self.tiles[r] = {}
@@ -109,6 +131,18 @@ function chessMap.new(levelRows, opts)
 
             self.tiles[r][c] = tile
         end
+    end
+
+    -- tunnel pairing: opts.tunnels = { {id=,col=,row=}, ... } -- each entry
+    -- tags the TUNNEL tile already placed there (via the "T" legend char)
+    -- with which pair it belongs to, so :getTunnelExit can find the other end.
+    for _, t in ipairs(opts.tunnels or {}) do
+        local tile = self.tiles[t.row] and self.tiles[t.row][t.col]
+        assert(tile and tile.type == chessMap.TILE.TUNNEL,
+            "chessMap: opts.tunnels entry at (" .. t.col .. "," .. t.row .. ") isn't a TUNNEL ('T') tile")
+        tile.tunnelId = t.id
+        self.tunnelsById[t.id] = self.tunnelsById[t.id] or {}
+        table.insert(self.tunnelsById[t.id], { col = t.col, row = t.row })
     end
 
     self.tileVisuals = {} -- [row][col] = { bg=rect, overlay=image|nil }
@@ -139,17 +173,44 @@ function chessMap:getTile(col, row)
     return self.tiles[row][col]
 end
 
-function chessMap:isWalkable(col, row)
+-- pawn is optional -- pass the pawn attempting to enter (col,row) so a Tiny
+-- Size one can pass through JAIL/WALL_HOLE/TUNNEL tiles; omit it (or pass a
+-- non-Tiny pawn) to get "blocked for everyone" behavior, which is correct
+-- for generic checks that aren't about a specific mover (chain-push/pull
+-- landings currently use it this way -- see chessUpdtr).
+function chessMap:isWalkable(col, row, pawn)
     local tile = self:getTile(col, row)
     if not tile then return false end
-    return tile.type ~= chessMap.TILE.WALL and tile.type ~= chessMap.TILE.VOID
+    if tile.type == chessMap.TILE.WALL or tile.type == chessMap.TILE.VOID then return false end
+    if TINY_ONLY_TILES[tile.type] then
+        return pawn ~= nil and pawn.traits ~= nil and pawn.traits["tiny_size"] == true
+    end
+    return true
 end
 
 function chessMap:isBlocking(col, row)
-    -- true if a straight-line effect (like Fire Beam) should stop here
+    -- true if a straight-line effect (like Fire Beam) should stop here.
+    -- JAIL/WALL_HOLE/TUNNEL are all physically slim enough to see through
+    -- (bars, a hole, a tunnel mouth) -- only a solid WALL blocks sight.
     local tile = self:getTile(col, row)
     if not tile then return true end
     return tile.type == chessMap.TILE.WALL
+end
+
+-- Returns the OTHER end of a paired tunnel (col,row belongs to), or nil if
+-- this isn't a paired tunnel tile. If more than two tiles share an id
+-- (unusual), returns the first other one found.
+function chessMap:getTunnelExit(col, row)
+    local tile = self:getTile(col, row)
+    if not tile or tile.type ~= chessMap.TILE.TUNNEL or not tile.tunnelId then return nil end
+    local group = self.tunnelsById[tile.tunnelId]
+    if not group then return nil end
+    for _, spot in ipairs(group) do
+        if spot.col ~= col or spot.row ~= row then
+            return spot.col, spot.row
+        end
+    end
+    return nil
 end
 
 -- ------------------------------------------------------------------- DRAW

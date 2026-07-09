@@ -60,6 +60,53 @@ function traitMng.registerDefaults()
         name = "Stealth",
         description = "Ignored by automatic enemy line-of-sight targeting.",
     })
+
+    -- ARMOR / PROTECTED: both grant full immunity to Treant's melee slam
+    -- and Spitter's acid ball (checked in chessUpdtr:findMeleeVictims /
+    -- the acid_spit ability), and both count as "armored" for the
+    -- jump-landing resolution table (see dragBehindChain's sibling,
+    -- chessUpdtr's resolveJumpLanding): an armored pawn that lands on
+    -- someone always crushes them, regardless of the other pawn's traits.
+    -- Kept as two separate ids (rather than collapsing to one) since a
+    -- level might want to grant them from different sources (a shield
+    -- item vs. a temporary ward spell) while meaning the same thing
+    -- mechanically -- every check below treats them identically.
+    traitMng.register({
+        id = "armor",
+        name = "Armor",
+        description = "Immune to Treant's slam and Spitter's acid ball. Crushes whoever it jump-lands on.",
+    })
+    traitMng.register({
+        id = "protected",
+        name = "Protected",
+        description = "Immune to Treant's slam and Spitter's acid ball. Crushes whoever it jump-lands on.",
+    })
+
+    -- PARRY: immune to Treant's melee slam specifically (not Spitter's
+    -- ranged acid) -- a defensive trait themed around blocking adjacent
+    -- attacks rather than dodging ranged ones.
+    traitMng.register({
+        id = "parry",
+        name = "Parry",
+        description = "Immune to Treant's melee slam (does not stop ranged attacks like Spitter's acid ball).",
+    })
+
+    -- SPIKE-HEADED: a pawn a non-armored jumper is impaled on. See the
+    -- jump-landing resolution table in chessUpdtr:resolveJumpLanding.
+    traitMng.register({
+        id = "spike_headed",
+        name = "Spike-Headed",
+        description = "A non-Armored/Protected pawn that jump-lands on this one dies instead.",
+    })
+
+    -- TINY SIZE: can pass through jail bars, a wall's tiny hole, and
+    -- tunnels (including teleporting between a paired tunnel's two ends)
+    -- -- tiles that block every other pawn. Checked in chessMap:isWalkable.
+    traitMng.register({
+        id = "tiny_size",
+        name = "Tiny Size",
+        description = "Can pass through jail bars, wall holes, and tunnels (which teleport it to the paired exit).",
+    })
 end
 
 return traitMng

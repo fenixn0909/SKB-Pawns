@@ -184,6 +184,14 @@ function pawnCon:onKeyEvent(event)
         self:cyclePCs(1)
         return true
     end
+    if key == "q" then
+        self:cyclePCs(-1) -- previous PC
+        return true
+    end
+    if key == "e" then
+        self:cyclePCs(1) -- next PC
+        return true
+    end
     local num = tonumber(key)
     if num and num >= 1 and num <= 9 then
         local pcs = self.dplyr:getAllByFaction("pc")
