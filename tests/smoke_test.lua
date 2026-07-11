@@ -213,6 +213,22 @@ updtr:checkClearCondition()
 assert(map:getTile(25, 14).type == "cage", "cage_b should close again once its button is vacated")
 print("cage OK: both gates open on their own button and close independently when vacated")
 
+line("CAGE MECHANISM -- A CLOSED CAGE ACTUALLY BLOCKS A PAWN'S MOVE, NOT JUST isWalkable")
+assert(map:getTile(17, 13).type == "cage", "cage_a should be closed again (button was vacated above)")
+dplyr:moveTo(knight.id, 18, 13) -- just east of the closed cage tile
+local trappedOk = updtr:requestStep(knight, -1, 0) -- try to step west, into the closed cage
+assert(not trappedOk, "a pawn should be refused entry into a closed cage tile")
+assert(knight.col == 18 and knight.row == 13, "knight should not have moved -- still trapped on this side")
+dplyr:moveTo(mage.id, 16, 13) -- stand on cage_a's button to open it
+updtr:checkClearCondition()
+assert(map:getTile(17, 13).type == "cage_open", "cage_a should be open now")
+local freedOk = updtr:requestStep(knight, -1, 0)
+assert(freedOk, "once the cage is open, the same step should succeed")
+assert(knight.col == 17 and knight.row == 13, "knight should have moved onto the now-open cage tile")
+print("cage OK: closed cage refused the step; opening it let the identical step through")
+dplyr:moveTo(mage.id, 10, 13) -- off the button again, so it doesn't interfere with later tests
+updtr:checkClearCondition()
+
 -- ------------------------------------------------------------- TURN CYCLE
 line("TURN CYCLE / ENEMY AI PHASE")
 local turnEvents = {}
@@ -448,33 +464,76 @@ treant = dplyr:getById(treant.id)
 spitter = dplyr:getById(spitter.id)
 
 -- ------------------------------------------------------- TREANT SLAM
-line("TREANT SLAM (melee8) -- HITS ALL 8 NEIGHBORS, ARMOR/PROTECTED/PARRY IMMUNE")
+line("TREANT SLAM (melee4) -- HITS ANY LIVING PAWN IN THE 4 CARDINAL TILES, EITHER FACTION")
+local brute = dplyr:getById(enemies[3].id) -- enemies[] wasn't refreshed after HISTORY like the named locals above -- re-fetch directly
 dplyr:moveTo(treant.id, 5, 8) -- row 8 fully open, away from the mechanism/hazard tiles
 for _, d in ipairs({ {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} }) do
     local occ = dplyr:getAt(5 + d[1], 8 + d[2])
     if occ and occ.id ~= treant.id then dplyr:remove(occ.id) end
 end
-dplyr:moveTo(knight.id, 4, 7)    -- NW: no immunity
-dplyr:moveTo(mage.id, 5, 7)      -- N: armor
-dplyr:moveTo(guardian.id, 6, 7)  -- NE: protected
-dplyr:moveTo(brawler.id, 4, 8)   -- W: parry
+dplyr:moveTo(mage.id, 5, 7)     -- N: armor
+dplyr:moveTo(guardian.id, 5, 9) -- S: protected
+dplyr:moveTo(brawler.id, 4, 8)  -- W: parry
+dplyr:moveTo(brute.id, 6, 8)    -- E: an ENEMY, no immunity -- proves the slam is faction-agnostic
+dplyr:moveTo(knight.id, 4, 7)   -- NW (diagonal): no immunity, but diagonals no longer count
 dplyr:addTrait(mage.id, "armor")
 dplyr:addTrait(guardian.id, "protected")
 dplyr:addTrait(brawler.id, "parry")
 
-local knightHp5, mageHp5, guardianHp5, brawlerHp5 = knight.hp, mage.hp, guardian.hp, brawler.hp
+local mageHp5, guardianHp5, brawlerHp5, bruteHp5, knightHp5 = mage.hp, guardian.hp, brawler.hp, brute.hp, knight.hp
 updtr.turn = chessUpdtr.TURN.ENEMY -- treant_slam is an enemy ability; simulate enemy phase directly
 local slamOk = updtr:useAbility(treant, "treant_slam", nil)
 assert(slamOk, "treant_slam should execute")
-assert(knight.hp == knightHp5 - 2, "unarmored knight should take slam damage")
 assert(mage.hp == mageHp5, "armored mage should be immune to the slam")
 assert(guardian.hp == guardianHp5, "protected guardian should be immune to the slam")
 assert(brawler.hp == brawlerHp5, "parrying brawler should be immune to the slam")
-print("treant_slam OK: knight hp", knightHp5, "->", knight.hp, "-- armor/protected/parry all held")
+assert(brute.hp == bruteHp5 - 2, "an unarmored ENEMY adjacent to the treant should also take damage -- the slam doesn't care about faction")
+assert(knight.hp == knightHp5, "a pawn only diagonally adjacent should NOT be hit -- melee4 is cardinal-only, no diagonals")
+print("treant_slam OK: N/S/W all immune as expected, E (an enemy) took", bruteHp5 - brute.hp, "damage, diagonal NW untouched")
+dplyr:moveTo(brute.id, 18, 10) -- back near its own spawn -- (6,8) is reused by later tests
 updtr.turn = chessUpdtr.TURN.PC
 dplyr:removeTrait(mage.id, "armor")
 dplyr:removeTrait(guardian.id, "protected")
 dplyr:removeTrait(brawler.id, "parry")
+
+line("TREANT SLAM -- THREE TREANTS IN A LINE ALL DAMAGE EACH OTHER")
+local treant2 = dplyr:deploy("enemy_treant", 12, 8)
+local treant3 = dplyr:deploy("enemy_treant", 13, 8)
+dplyr:moveTo(treant.id, 11, 8)
+local t1Hp, t2Hp, t3Hp = treant.hp, treant2.hp, treant3.hp
+updtr.turn = chessUpdtr.TURN.ENEMY -- treant_slam is an enemy ability; simulate enemy phase directly
+for _, t in ipairs({ treant, treant2, treant3 }) do
+    updtr:useAbility(t, "treant_slam", nil)
+end
+assert(treant.hp == t1Hp - 2, "end treant should take one hit from its only neighbor")
+assert(treant3.hp == t3Hp - 2, "the other end treant should also take one hit")
+assert(treant2.hp == t2Hp - 4, "the middle treant has neighbors on both sides -- should take two hits")
+print("treant_slam OK: line of 3 treants all damaged each other, middle one took", t2Hp - treant2.hp)
+dplyr:remove(treant2.id); dplyr:remove(treant3.id)
+updtr.turn = chessUpdtr.TURN.PC
+
+line("TREANT SLAM -- A CLOSED CAGE BLOCKS THE SLAM (A CAGED HOSTILE CAN'T ATTACK THROUGH IT)")
+knight.hp = knight.maxHp -- heal first -- accumulated damage from earlier tests could otherwise let this test's hit kill (and remove) it
+if knight.hpText then knight.hpText.text = tostring(knight.hp) end
+dplyr:moveTo(treant.id, 15, 8)
+dplyr:moveTo(knight.id, 17, 8) -- 2 tiles east -- an ad-hoc closed cage sits between them at (16,8)
+local originalTileType = map.tiles[8][16].type
+map.tiles[8][16].type = "cage" -- not tied to any button group -- just testing that ANY closed cage blocks
+map:refreshTile(16, 8)
+local cagedHpBefore = knight.hp
+updtr.turn = chessUpdtr.TURN.ENEMY
+updtr:useAbility(treant, "treant_slam", nil)
+assert(knight.hp == cagedHpBefore, "a pawn on the far side of a closed cage isn't adjacent -- the slam shouldn't reach it")
+map.tiles[8][16].type = originalTileType -- open it back up and move the PC to genuinely adjacent
+map:refreshTile(16, 8)
+dplyr:moveTo(knight.id, 16, 8)
+local cagedHpBefore2 = knight.hp
+updtr:useAbility(treant, "treant_slam", nil)
+assert(knight.hp == cagedHpBefore2 - 2, "once actually adjacent (cage out of the way), the identical slam connects")
+print("treant_slam OK: a closed cage blocked the attack; removing it let the same attack connect")
+knight.hp = knight.maxHp -- heal back -- knight accumulates damage across this whole file and later tests need it alive
+if knight.hpText then knight.hpText.text = tostring(knight.hp) end
+updtr.turn = chessUpdtr.TURN.PC
 
 -- -------------------------------------------------------- ACID SPIT
 line("ACID SPIT (beam_first) -- STOPS AT FIRST PAWN; PARRY DOES NOT HELP")
@@ -499,6 +558,30 @@ assert(brawler.hp == brawlerHp7, "armor SHOULD protect against acid_spit")
 assert(slinger.hp == slingerHp7, "the shot should still stop at the armored pawn, not pierce through")
 print("acid_spit OK: armored brawler took no damage; shot didn't pierce through to slinger")
 dplyr:removeTrait(brawler.id, "armor")
+updtr.turn = chessUpdtr.TURN.PC
+
+line("ACID SPIT -- CAN'T SEE THROUGH A NON-LIVING PAWN (STONE/CRATE)")
+slinger.hp = slinger.maxHp -- heal first -- accumulated damage from earlier tests could otherwise let this test's hit kill (and remove) it
+if slinger.hpText then slinger.hpText.text = tostring(slinger.hp) end
+dplyr:moveTo(guardian.id, 22, 9) -- clear out of row 9 -- it was left at (5,9) by the earlier treant test
+dplyr:moveTo(spitter.id, 2, 9)
+dplyr:moveTo(slinger.id, 8, 9) -- would be a clear shot if nothing were in the way
+local blockerStone = dplyr:deploy("stone_a", 5, 9) -- a non-living pawn directly in the line
+local slingerHp8 = slinger.hp
+updtr.turn = chessUpdtr.TURN.ENEMY
+assert(updtr:findBeamTarget(spitter) == nil,
+    "a stone blocking the line means there's no valid target -- findBeamTarget should see nobody")
+updtr:runEnemyPhase() -- the automatic dispatch path should agree and do nothing
+assert(slinger.hp == slingerHp8, "the stone should have blocked the shot entirely -- slinger untouched")
+dplyr:remove(blockerStone.id)
+local firedAt = updtr:findBeamTarget(spitter)
+assert(firedAt and firedAt.col == slinger.col and firedAt.row == slinger.row,
+    "with the stone gone, the same line should be clear again")
+updtr:runEnemyPhase()
+assert(slinger.hp == slingerHp8 - 2, "with the line clear, the spitter should auto-fire and hit slinger")
+print("acid_spit OK: a stone fully blocked the shot; removing it let the spitter see and fire again")
+slinger.hp = slinger.maxHp -- heal back -- slinger accumulates damage across this file and later Throw tests need it alive
+if slinger.hpText then slinger.hpText.text = tostring(slinger.hp) end
 updtr.turn = chessUpdtr.TURN.PC
 
 -- -------------------------------------------- GENERALIZED ENEMY AI DISPATCH

@@ -162,7 +162,7 @@ logText:setFillColor(0.75, 0.9, 0.75)
 
 local hotkeysText = display.newText({
     parent = sidebarGroup,
-    text = "Tab/Q/E/1-9 switch\nArrows/tap move\nG guard  Space end turn\n, undo  . redo\nR restart\n+/- zoom",
+    text = "Tab/Q/E/1-9 switch\nI/P cycle hostiles\nArrows/tap move\nG guard  Space end turn\n, undo  . redo\nR restart\n+/- zoom",
     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 34, font = native.systemFont, fontSize = 11,
     width = SIDEBAR_W - 16,
 })

@@ -127,8 +127,9 @@ pawnDplyr.KIND_INFO = {
         faction = pawnDplyr.FACTION.ENEMY,
         name = "Wraith", hp = 3, abilities = { "fire_beam" }, traits = {},
     },
-    -- TREANT: stationary melee attacker -- every enemy turn, hits all 8
-    -- surrounding tiles (see abltMng's "treant_slam", aiPattern "melee8").
+    -- TREANT: stationary melee attacker -- every enemy turn, hits any
+    -- living pawn (either faction) in the 4 cardinal-adjacent tiles (see
+    -- abltMng's "treant_slam", aiPattern "melee4").
     -- Armor / Protected / Parry all grant immunity.
     enemy_treant = {
         images = {
@@ -318,57 +319,6 @@ function pawnDplyr:deploy(kind, col, row, opts)
 
     self:_buildVisuals(pawn, info)
 
-    -- facing indicator: a small triangle on a rotating sub-group so pawns
-    -- with a facing-dependent ability (Swap) can actually be aimed by eye.
-    -- Only living/actor pawns need this -- stones/crates/gears never move
-    -- under their own power, so skip the visual clutter on them.
-    if not pawn.isMovableOnly then
-        local facingGroup = display.newGroup()
-        container:insert(facingGroup)
-        facingGroup.x, facingGroup.y = 0, 0
-        local tip = size * 0.5
-        local indicator = display.newPolygon(facingGroup, 0, 0,
-            { tip, 0, tip - size * 0.16, size * 0.12, tip - size * 0.16, -size * 0.12 })
-        indicator:setFillColor(1, 0.85, 0.3)
-        indicator.strokeWidth = 1
-        indicator:setStrokeColor(0.05, 0.05, 0.06)
-        pawn.facingIndicator = facingGroup
-        self:_applyFacingRotation(pawn)
-    end
-end
-
--- ----------------------------------------------------------------- DEPLOY
--- kind: key into KIND_INFO. opts: { faction override, hp override }
-function pawnDplyr:deploy(kind, col, row, opts)
-    opts = opts or {}
-    local info = pawnDplyr.KIND_INFO[kind]
-    assert(info, "pawnDplyr: unknown kind '" .. tostring(kind) .. "'")
-
-    local id = self.nextId
-    self.nextId = self.nextId + 1
-
-    local faction = opts.faction or info.faction
-
-    local pawn = {
-        id = id,
-        kind = kind,
-        subType = info.subType,
-        name = info.name,
-        faction = faction,
-        hp = opts.hp or info.hp,
-        maxHp = opts.hp or info.hp,
-        abilities = info.abilities,
-        movingAbility = info.movingAbility,
-        traits = copyTraitSet(info.traits),
-        col = col,
-        row = row,
-        isMovableOnly = info.isMovableOnly or info.isMechanism,
-        statuses = {}, -- e.g. statuses.guarded = turnsRemaining; see chessUpdtr for buff/debuff shapes
-        facing = DEFAULT_FACING[faction] or { 0, 1 },
-    }
-
-    self:_buildVisuals(pawn, info)
-
     self.pawns[id] = pawn
     self.occupancy[occKey(col, row)] = id
 
@@ -451,6 +401,11 @@ function pawnDplyr:_applySprite(pawn)
     pawn.container:insert(1, sprite) -- keep it behind the HP label
     pawn.sprite = sprite
     if pawn.shadow then pawn.container:insert(1, pawn.shadow) end -- re-assert shadow-behind-sprite order
+    -- the OLD sprite object took its tap listener down with it when
+    -- removed -- re-attach the same stored handler (see
+    -- pawnCon:registerSelectable) to the new one, or clicking this pawn
+    -- would silently stop working the moment its facing changes.
+    if pawn._tapHandler then sprite:addEventListener("tap", pawn._tapHandler) end
 end
 
 -- Sets which way a pawn is looking (used by facing-dependent abilities
@@ -538,36 +493,58 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
     local x, y = self.map:gridToWorld(col, row)
     local duration = opts.duration or 160
     transition.cancel(pawn.container)
-    transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })
 
     -- Jump/air-state readability: Throw's own hop and a lightweight
-    -- pawn's bounce-onward landing both pass opts.jump=true. The sprite
-    -- visibly lifts and scales up, with a drop shadow fading in beneath
-    -- it, then both settle back to normal on landing -- so a pawn mid-air
-    -- reads differently from a normal step, push, pull, swap, or kick
-    -- slide (none of which set opts.jump).
-    if opts.jump and pawn.sprite and pawn.shadow then
-        local size = self.map.tileSize
-        local liftY = -size * 0.35
+    -- pawn's bounce-onward landing both pass opts.jump=true. A pawn mid-
+    -- air needs to read differently from a normal step, push, pull, swap,
+    -- or kick slide (none of which set opts.jump).
+    --
+    -- This used to be a linear container move PLUS a separate sprite-local
+    -- Y offset for the "hop". That reads fine moving up/left/right, since
+    -- the offset is either orthogonal to the travel direction or adds to
+    -- it -- but moving down, the offset (screen-up) fights the container's
+    -- own downward travel (screen-down) and gets visually swallowed by it,
+    -- so it just looked like a slide. Animating the CONTAINER itself along
+    -- a real two-leg parabola (up to a peak that's offset above the
+    -- straight-line midpoint, then down to the destination) fixes that for
+    -- every direction, since the peak offset is relative to the pawn's own
+    -- interpolated position, not fighting its direction of travel.
+    if opts.jump then
+        local startX, startY = pawn.container.x, pawn.container.y
+        local midX, midY = (startX + x) / 2, (startY + y) / 2
+        local liftAmount = self.map.tileSize * 0.55
+        local peakX, peakY = midX, midY - liftAmount
         local upTime = duration * 0.5
         local downTime = duration - upTime
-        local sprite, shadow = pawn.sprite, pawn.shadow
-        transition.cancel(sprite)
-        transition.cancel(shadow)
-        sprite.y, sprite.xScale, sprite.yScale = 0, 1, 1
-        shadow.alpha = 0
-        transition.to(sprite, {
-            y = liftY, xScale = 1.18, yScale = 1.18, time = upTime, transition = easing.outQuad,
+
+        transition.to(pawn.container, {
+            x = peakX, y = peakY, time = upTime, transition = easing.outQuad,
             onComplete = function()
-                transition.to(sprite, { y = 0, xScale = 1, yScale = 1, time = downTime, transition = easing.inQuad })
+                transition.to(pawn.container, { x = x, y = y, time = downTime, transition = easing.inQuad })
             end,
         })
-        transition.to(shadow, {
-            alpha = 1, time = upTime, transition = easing.outQuad,
-            onComplete = function()
-                transition.to(shadow, { alpha = 0, time = downTime, transition = easing.inQuad })
-            end,
-        })
+
+        if pawn.sprite and pawn.shadow then
+            local sprite, shadow = pawn.sprite, pawn.shadow
+            transition.cancel(sprite)
+            transition.cancel(shadow)
+            sprite.xScale, sprite.yScale = 1, 1
+            shadow.alpha = 0
+            transition.to(sprite, {
+                xScale = 1.18, yScale = 1.18, time = upTime, transition = easing.outQuad,
+                onComplete = function()
+                    transition.to(sprite, { xScale = 1, yScale = 1, time = downTime, transition = easing.inQuad })
+                end,
+            })
+            transition.to(shadow, {
+                alpha = 1, time = upTime, transition = easing.outQuad,
+                onComplete = function()
+                    transition.to(shadow, { alpha = 0, time = downTime, transition = easing.inQuad })
+                end,
+            })
+        end
+    else
+        transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })
     end
 
     Runtime:dispatchEvent({ name = "pawnMoved", pawnId = pawnId, col = col, row = row })
@@ -595,11 +572,31 @@ function pawnDplyr:swapPawns(idA, idB)
     Runtime:dispatchEvent({ name = "pawnMoved", pawnId = idB, col = aCol, row = aRow })
 end
 
+-- Quick horizontal jitter feedback for "this pawn just got hit" -- see
+-- :applyDamage. Reads against the container's CURRENT x (captured once at
+-- the start) rather than an absolute stored position, so it composes
+-- fine even if a move happens to be resolving around the same moment.
+function pawnDplyr:shakePawn(pawnId)
+    local pawn = self.pawns[pawnId]
+    if not pawn or not pawn.container then return end
+    local c = pawn.container
+    local x0 = c.x
+    local amt = self.map.tileSize * 0.12
+    transition.to(c, { x = x0 - amt, time = 40, transition = easing.outQuad, onComplete = function()
+        if not pawn.container then return end
+        transition.to(c, { x = x0 + amt, time = 40, transition = easing.outQuad, onComplete = function()
+            if not pawn.container then return end
+            transition.to(c, { x = x0, time = 40, transition = easing.inQuad })
+        end })
+    end })
+end
+
 function pawnDplyr:applyDamage(pawnId, amount)
     local pawn = self.pawns[pawnId]
     if not pawn or not pawn.hp then return end
     pawn.hp = math.max(0, pawn.hp - amount)
     if pawn.hpText then pawn.hpText.text = tostring(pawn.hp) end
+    self:shakePawn(pawnId)
     if pawn.hp <= 0 then
         self:remove(pawnId)
         return true -- died

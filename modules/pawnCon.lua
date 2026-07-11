@@ -40,12 +40,17 @@ function pawnCon.new(dplyrRef, mapRef, updtrRef, boardHitRect)
 end
 
 -- call once right after pawnDplyr:deploy() for every pawn that should be
--- tappable (all of them -- enemies are tappable as ability targets too)
+-- tappable (all of them -- enemies are tappable for sidebar inspection
+-- too, see onPawnTap). Stashes the handler on the pawn itself so
+-- pawnDplyr:_applySprite can re-attach it whenever facing swaps the
+-- sprite object out from under it (see that function's comment).
 function pawnCon:registerSelectable(pawn)
-    pawn.sprite:addEventListener("tap", function(event)
+    local handler = function(event)
         self:onPawnTap(pawn)
         return true
-    end)
+    end
+    pawn._tapHandler = handler
+    pawn.sprite:addEventListener("tap", handler)
 end
 
 -- ---------------------------------------------------------------- SELECT
@@ -88,6 +93,30 @@ function pawnCon:cyclePCs(direction)
     self:select(pcs[newIdx].id)
 end
 
+-- Cycles through enemy pawns for sidebar inspection (see onPawnTap) --
+-- 'i'/'p' mirror how Q/E cycle PCs. Bound directly to those keys below
+-- rather than reusing Tab/Q/E, so cycling hostiles never fights with
+-- cycling your own PCs.
+function pawnCon:cycleHostiles(direction)
+    local enemies = self.dplyr:getAllByFaction("enemy")
+    if #enemies == 0 then return end
+    table.sort(enemies, function(a, b) return a.id < b.id end)
+
+    local idx = 1
+    for i, p in ipairs(enemies) do
+        if p.id == self.selectedId then idx = i break end
+    end
+    -- if a PC (or nothing) is currently selected, start from the first
+    -- hostile rather than wrapping relative to an index that isn't in
+    -- this list at all
+    local currentIsHostile = false
+    for _, p in ipairs(enemies) do
+        if p.id == self.selectedId then currentIsHostile = true break end
+    end
+    local newIdx = currentIsHostile and (((idx - 1 + direction) % #enemies) + 1) or 1
+    self:select(enemies[newIdx].id)
+end
+
 -- ------------------------------------------------------------------ MODE
 -- MOVE: tapping a tile moves the selected pawn there.
 -- ABILITY: an ability is armed (self.pendingAbility); the next tap on a
@@ -113,12 +142,18 @@ function pawnCon:beginAbility(abilityId)
 end
 
 -- ------------------------------------------------------------------ TAPS
+-- Tapping a PC selects it as normal. Tapping a hostile (when no ability is
+-- armed) also selects it -- not to command it (chessUpdtr's turn/faction
+-- check still refuses to move or act it), just so its info shows in the
+-- sidebar. Neutral pawns (stones/crates/gears) aren't selectable this way
+-- -- there's nothing to inspect on them. See also 'i'/'p' below for
+-- cycling hostiles by keyboard.
 function pawnCon:onPawnTap(pawn)
     if self.mode == pawnCon.MODE.ABILITY and self.pendingAbility then
         self:resolveAbility(pawn)
         return
     end
-    if pawn.faction == "pc" then
+    if pawn.faction == "pc" or pawn.faction == "enemy" then
         self:select(pawn.id)
     end
 end
@@ -190,6 +225,14 @@ function pawnCon:onKeyEvent(event)
     end
     if key == "e" then
         self:cyclePCs(1) -- next PC
+        return true
+    end
+    if key == "i" then
+        self:cycleHostiles(1) -- next hostile
+        return true
+    end
+    if key == "p" then
+        self:cycleHostiles(-1) -- previous hostile
         return true
     end
     local num = tonumber(key)

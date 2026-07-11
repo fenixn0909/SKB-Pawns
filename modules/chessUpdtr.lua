@@ -213,14 +213,20 @@ function chessUpdtr:buildCtx()
             return { affectedIds = {} }
         end,
 
-        -- Damages every PC in the 8 tiles surrounding `user` (Treant Slam).
-        -- immuneTraits: any PC with one of these takes no damage.
-        meleeSlam8 = function(user, damage, immuneTraits)
-            local dirs = { {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} }
+        -- Damages any LIVING pawn (has hp -- either faction, so e.g. a
+        -- treant standing next to another treant hits it too) in the 4
+        -- cardinal tiles surrounding `user` (Treant Slam). Non-living
+        -- pawns (stones/crates/gears) are untouched -- they have no hp to
+        -- damage. immuneTraits: a living pawn with any of these takes no
+        -- damage. Cage-enclosed targets are naturally excluded already:
+        -- if a closed cage sits between `user` and a would-be target,
+        -- that target simply isn't in one of these 4 adjacent tiles.
+        meleeSlam4 = function(user, damage, immuneTraits)
+            local dirs = { {0,-1}, {0,1}, {-1,0}, {1,0} }
             local affected = {}
             for _, d in ipairs(dirs) do
                 local p = dplyr:getAt(user.col + d[1], user.row + d[2])
-                if p and p.faction == "pc" then
+                if p and p.hp and p.id ~= user.id then
                     local immune = false
                     for _, t in ipairs(immuneTraits or {}) do
                         if dplyr:hasTrait(p, t) then immune = true break end
@@ -510,7 +516,7 @@ function chessUpdtr:endTurn()
 end
 
 -- Each enemy checks every ability it has for an aiPattern (see
--- abltMng.TRIGGER's doc comment) and fires accordingly: "melee8" always
+-- abltMng.TRIGGER's doc comment) and fires accordingly: "melee4" always
 -- fires (no targeting needed), "beam_pierce"/"beam_first" only fire if
 -- findBeamTarget finds a clear line to a PC.
 function chessUpdtr:runEnemyPhase()
@@ -519,7 +525,7 @@ function chessUpdtr:runEnemyPhase()
         if enemy.hp and enemy.hp > 0 then
             for _, abilityId in ipairs(enemy.abilities or {}) do
                 local def = abltMng.get(abilityId)
-                if def and def.aiPattern == "melee8" then
+                if def and def.aiPattern == "melee4" then
                     self:useAbility(enemy, abilityId, nil)
                 elseif def and (def.aiPattern == "beam_pierce" or def.aiPattern == "beam_first") then
                     local firedAt = self:findBeamTarget(enemy)

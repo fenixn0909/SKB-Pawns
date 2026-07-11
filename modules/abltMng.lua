@@ -71,9 +71,10 @@ abltMng.TRIGGER = {
 --                    row/column, damage runs through everyone on the line.
 --   "beam_first"  -- acid_spit's pattern: same aiming, but the shot stops
 --                    at (and only affects) the first pawn it reaches.
---   "melee8"      -- treant_slam's pattern: no aiming/targeting at all --
---                    fires every enemy turn regardless, hitting all 8
---                    surrounding tiles at once.
+--   "melee4"      -- treant_slam's pattern: no aiming/targeting at all --
+--                    fires every enemy turn regardless, hitting any
+--                    living pawn (either faction) in the 4 cardinal-adjacent
+--                    tiles at once.
 
 local registry = {}
 
@@ -192,20 +193,22 @@ function abltMng.registerDefaults()
         end,
     })
 
-    -- TREANT SLAM: hits every PC in the 8 surrounding tiles (including
-    -- diagonals) -- fires automatically every enemy turn regardless of
-    -- position (see aiPattern "melee8"). Armor, Protected, and Parry all
-    -- grant immunity.
+    -- TREANT SLAM: hits any LIVING pawn (either faction) in the 4
+    -- cardinal-adjacent tiles -- fires automatically every enemy turn
+    -- regardless of position (see aiPattern "melee4"). Since it doesn't
+    -- care about faction, treants standing next to each other (e.g. lined
+    -- up by a push/kick) damage one another too. Armor, Protected, and
+    -- Parry all grant immunity.
     abltMng.register({
         id = "treant_slam",
         name = "Treant Slam",
-        description = "Damages every PC in the 8 surrounding tiles. Armor, Protected, and Parry all grant immunity.",
+        description = "Damages any living pawn in the 4 cardinal-adjacent tiles, either faction. Armor, Protected, and Parry all grant immunity.",
         targeting = abltMng.TARGETING.NONE,
         trigger = abltMng.TRIGGER.ACTIVE,
-        aiPattern = "melee8",
+        aiPattern = "melee4",
         apCost = 1,
         execute = function(user, _target, ctx)
-            return ctx.meleeSlam8(user, 2, { "armor", "protected", "parry" })
+            return ctx.meleeSlam4(user, 2, { "armor", "protected", "parry" })
         end,
     })
 
