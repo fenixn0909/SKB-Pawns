@@ -499,30 +499,25 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
     -- air needs to read differently from a normal step, push, pull, swap,
     -- or kick slide (none of which set opts.jump).
     --
-    -- This used to be a linear container move PLUS a separate sprite-local
-    -- Y offset for the "hop". That reads fine moving up/left/right, since
-    -- the offset is either orthogonal to the travel direction or adds to
-    -- it -- but moving down, the offset (screen-up) fights the container's
-    -- own downward travel (screen-down) and gets visually swallowed by it,
-    -- so it just looked like a slide. Animating the CONTAINER itself along
-    -- a real two-leg parabola (up to a peak that's offset above the
-    -- straight-line midpoint, then down to the destination) fixes that for
-    -- every direction, since the peak offset is relative to the pawn's own
-    -- interpolated position, not fighting its direction of travel.
-    if opts.jump then
-        local startX, startY = pawn.container.x, pawn.container.y
-        local midX, midY = (startX + x) / 2, (startY + y) / 2
-        local liftAmount = self.map.tileSize * 0.55
-        local peakX, peakY = midX, midY - liftAmount
-        local upTime = duration * 0.5
-        local downTime = duration - upTime
+    -- A custom easing function (Solar2D accepts any function shaped like
+    -- easing.*, not just the built-in presets) that rides `change` +
+    -- `begin` linearly like normal, plus a sine bump peaking at the
+    -- midpoint. sin's own derivative is continuous everywhere (unlike two
+    -- eased legs meeting at a peak, where velocity drops to ~0 on both
+    -- sides right at the join -- that's what read as a laggy little pause
+    -- at the top of the hop). One continuous tween per property, no
+    -- onComplete-chaining, no stutter.
+    local function sineBump(amplitude)
+        return function(t, tDuration, tBegin, tChange)
+            local p = math.min(1, t / tDuration)
+            return tBegin + tChange * p + math.sin(p * math.pi) * amplitude
+        end
+    end
 
-        transition.to(pawn.container, {
-            x = peakX, y = peakY, time = upTime, transition = easing.outQuad,
-            onComplete = function()
-                transition.to(pawn.container, { x = x, y = y, time = downTime, transition = easing.inQuad })
-            end,
-        })
+    if opts.jump then
+        local liftAmount = self.map.tileSize * 0.55
+        transition.to(pawn.container, { x = x, time = duration, transition = easing.inOutQuad })
+        transition.to(pawn.container, { y = y, time = duration, transition = sineBump(-liftAmount) })
 
         if pawn.sprite and pawn.shadow then
             local sprite, shadow = pawn.sprite, pawn.shadow
@@ -530,18 +525,9 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
             transition.cancel(shadow)
             sprite.xScale, sprite.yScale = 1, 1
             shadow.alpha = 0
-            transition.to(sprite, {
-                xScale = 1.18, yScale = 1.18, time = upTime, transition = easing.outQuad,
-                onComplete = function()
-                    transition.to(sprite, { xScale = 1, yScale = 1, time = downTime, transition = easing.inQuad })
-                end,
-            })
-            transition.to(shadow, {
-                alpha = 1, time = upTime, transition = easing.outQuad,
-                onComplete = function()
-                    transition.to(shadow, { alpha = 0, time = downTime, transition = easing.inQuad })
-                end,
-            })
+            transition.to(sprite, { xScale = 1, time = duration, transition = sineBump(0.18) })
+            transition.to(sprite, { yScale = 1, time = duration, transition = sineBump(0.18) })
+            transition.to(shadow, { alpha = 0, time = duration, transition = sineBump(1) })
         end
     else
         transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })

@@ -190,7 +190,7 @@ local function updateAbilitiesLabel(pawn)
 
     local moveDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
 
-    local activeNames, passiveNames, flowNames = {}, {}, {}
+    local activeNames, passiveNames, flowNames, attackNames = {}, {}, {}, {}
     for _, id in ipairs(pawn.abilities or {}) do
         local def = abltMng.get(id)
         if def then
@@ -198,6 +198,8 @@ local function updateAbilitiesLabel(pawn)
                 table.insert(passiveNames, def.name)
             elseif def.trigger == abltMng.TRIGGER.FLOW then
                 table.insert(flowNames, def.name)
+            elseif def.trigger == abltMng.TRIGGER.ATTACK then
+                table.insert(attackNames, def.name)
             else
                 table.insert(activeNames, def.name)
             end
@@ -211,12 +213,16 @@ local function updateAbilitiesLabel(pawn)
     end
     table.sort(traitNames)
 
-    abilitiesText.text = string.format(
-        "Move: %s\nActive: %s\nPassive: %s\nFlow: %s\nTraits: %s",
-        moveDef and moveDef.name or "--",
-        namesOrDash(activeNames), namesOrDash(passiveNames), namesOrDash(flowNames),
-        namesOrDash(traitNames)
-    )
+    -- Attack only shows up at all for hostiles (no PC has an ATTACK-trigger
+    -- ability), so the line's simply omitted for PCs rather than showing a
+    -- perpetual "Attack: --".
+    local lines = { "Move: " .. (moveDef and moveDef.name or "--") }
+    if #attackNames > 0 then table.insert(lines, "Attack: " .. namesOrDash(attackNames)) end
+    table.insert(lines, "Active: " .. namesOrDash(activeNames))
+    table.insert(lines, "Passive: " .. namesOrDash(passiveNames))
+    table.insert(lines, "Flow: " .. namesOrDash(flowNames))
+    table.insert(lines, "Traits: " .. namesOrDash(traitNames))
+    abilitiesText.text = table.concat(lines, "\n")
 end
 
 -- small show/hide toggle for the sidebar, pinned outside sidebarGroup so

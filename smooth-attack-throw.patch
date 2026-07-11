@@ -1,0 +1,684 @@
+diff --git a/main.lua b/main.lua
+index 6c4dad6..5b6553e 100644
+--- a/main.lua
++++ b/main.lua
+@@ -162,7 +162,7 @@ logText:setFillColor(0.75, 0.9, 0.75)
+ 
+ local hotkeysText = display.newText({
+     parent = sidebarGroup,
+-    text = "Tab/Q/E/1-9 switch\nArrows/tap move\nG guard  Space end turn\n, undo  . redo\nR restart\n+/- zoom",
++    text = "Tab/Q/E/1-9 switch\nI/P cycle hostiles\nArrows/tap move\nG guard  Space end turn\n, undo  . redo\nR restart\n+/- zoom",
+     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 34, font = native.systemFont, fontSize = 11,
+     width = SIDEBAR_W - 16,
+ })
+@@ -190,7 +190,7 @@ local function updateAbilitiesLabel(pawn)
+ 
+     local moveDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
+ 
+-    local activeNames, passiveNames, flowNames = {}, {}, {}
++    local activeNames, passiveNames, flowNames, attackNames = {}, {}, {}, {}
+     for _, id in ipairs(pawn.abilities or {}) do
+         local def = abltMng.get(id)
+         if def then
+@@ -198,6 +198,8 @@ local function updateAbilitiesLabel(pawn)
+                 table.insert(passiveNames, def.name)
+             elseif def.trigger == abltMng.TRIGGER.FLOW then
+                 table.insert(flowNames, def.name)
++            elseif def.trigger == abltMng.TRIGGER.ATTACK then
++                table.insert(attackNames, def.name)
+             else
+                 table.insert(activeNames, def.name)
+             end
+@@ -211,12 +213,16 @@ local function updateAbilitiesLabel(pawn)
+     end
+     table.sort(traitNames)
+ 
+-    abilitiesText.text = string.format(
+-        "Move: %s\nActive: %s\nPassive: %s\nFlow: %s\nTraits: %s",
+-        moveDef and moveDef.name or "--",
+-        namesOrDash(activeNames), namesOrDash(passiveNames), namesOrDash(flowNames),
+-        namesOrDash(traitNames)
+-    )
++    -- Attack only shows up at all for hostiles (no PC has an ATTACK-trigger
++    -- ability), so the line's simply omitted for PCs rather than showing a
++    -- perpetual "Attack: --".
++    local lines = { "Move: " .. (moveDef and moveDef.name or "--") }
++    if #attackNames > 0 then table.insert(lines, "Attack: " .. namesOrDash(attackNames)) end
++    table.insert(lines, "Active: " .. namesOrDash(activeNames))
++    table.insert(lines, "Passive: " .. namesOrDash(passiveNames))
++    table.insert(lines, "Flow: " .. namesOrDash(flowNames))
++    table.insert(lines, "Traits: " .. namesOrDash(traitNames))
++    abilitiesText.text = table.concat(lines, "\n")
+ end
+ 
+ -- small show/hide toggle for the sidebar, pinned outside sidebarGroup so
+diff --git a/modules/abltMng.lua b/modules/abltMng.lua
+index 1eaf35c..7ffc7cd 100644
+--- a/modules/abltMng.lua
++++ b/modules/abltMng.lua
+@@ -63,17 +63,25 @@ abltMng.TRIGGER = {
+     MOVING  = "moving",
+     FACING  = "facing",
+     FLOW    = "flow",
++    ATTACK  = "attack", -- enemy-only auto-combat: no player ever arms these --
++                         -- they fire on their own during the enemy phase
++                         -- whenever a PC is in range/vision (see aiPattern
++                         -- below). Shown as "Attack" on the sidebar rather
++                         -- than lumped in with a PC's Active abilities.
+ }
+ 
+ -- Optional, enemy-only: how chessUpdtr's automatic enemy AI phase decides
+--- whether/how to fire an ACTIVE ability without a player picking a target.
++-- whether/how to fire an ATTACK-trigger ability without a player picking a
++-- target -- these fire every enemy turn on their own, checking their own
++-- vision/range for a living PC each time.
+ --   "beam_pierce" -- fire_beam's pattern: aim at any PC sharing a clear
+ --                    row/column, damage runs through everyone on the line.
+ --   "beam_first"  -- acid_spit's pattern: same aiming, but the shot stops
+ --                    at (and only affects) the first pawn it reaches.
+---   "melee8"      -- treant_slam's pattern: no aiming/targeting at all --
+---                    fires every enemy turn regardless, hitting all 8
+---                    surrounding tiles at once.
++--   "melee4"      -- treant_slam's pattern: no aiming/targeting at all --
++--                    fires every enemy turn regardless, hitting any
++--                    living pawn (either faction) in the 4 cardinal-adjacent
++--                    tiles at once.
+ 
+ local registry = {}
+ 
+@@ -173,7 +181,7 @@ function abltMng.registerDefaults()
+         name = "Fire Beam",
+         description = "Damage everything in a straight line until a wall.",
+         targeting = abltMng.TARGETING.DIRECTION_TILE,
+-        trigger = abltMng.TRIGGER.ACTIVE,
++        trigger = abltMng.TRIGGER.ATTACK,
+         aiPattern = "beam_pierce",
+         apCost = 1,
+         execute = function(user, targetTile, ctx)
+@@ -192,20 +200,22 @@ function abltMng.registerDefaults()
+         end,
+     })
+ 
+-    -- TREANT SLAM: hits every PC in the 8 surrounding tiles (including
+-    -- diagonals) -- fires automatically every enemy turn regardless of
+-    -- position (see aiPattern "melee8"). Armor, Protected, and Parry all
+-    -- grant immunity.
++    -- TREANT SLAM: hits any LIVING pawn (either faction) in the 4
++    -- cardinal-adjacent tiles -- fires automatically every enemy turn
++    -- regardless of position (see aiPattern "melee4"). Since it doesn't
++    -- care about faction, treants standing next to each other (e.g. lined
++    -- up by a push/kick) damage one another too. Armor, Protected, and
++    -- Parry all grant immunity.
+     abltMng.register({
+         id = "treant_slam",
+         name = "Treant Slam",
+-        description = "Damages every PC in the 8 surrounding tiles. Armor, Protected, and Parry all grant immunity.",
++        description = "Damages any living pawn in the 4 cardinal-adjacent tiles, either faction. Armor, Protected, and Parry all grant immunity.",
+         targeting = abltMng.TARGETING.NONE,
+-        trigger = abltMng.TRIGGER.ACTIVE,
+-        aiPattern = "melee8",
++        trigger = abltMng.TRIGGER.ATTACK,
++        aiPattern = "melee4",
+         apCost = 1,
+         execute = function(user, _target, ctx)
+-            return ctx.meleeSlam8(user, 2, { "armor", "protected", "parry" })
++            return ctx.meleeSlam4(user, 2, { "armor", "protected", "parry" })
+         end,
+     })
+ 
+@@ -219,7 +229,7 @@ function abltMng.registerDefaults()
+         name = "Acid Spit",
+         description = "Damages the first non-immune pawn in a clear line. Armor and Protected grant immunity.",
+         targeting = abltMng.TARGETING.DIRECTION_TILE,
+-        trigger = abltMng.TRIGGER.ACTIVE,
++        trigger = abltMng.TRIGGER.ATTACK,
+         aiPattern = "beam_first",
+         apCost = 1,
+         execute = function(user, targetTile, ctx)
+diff --git a/modules/chessUpdtr.lua b/modules/chessUpdtr.lua
+index b4ec83b..4b174f0 100644
+--- a/modules/chessUpdtr.lua
++++ b/modules/chessUpdtr.lua
+@@ -213,14 +213,20 @@ function chessUpdtr:buildCtx()
+             return { affectedIds = {} }
+         end,
+ 
+-        -- Damages every PC in the 8 tiles surrounding `user` (Treant Slam).
+-        -- immuneTraits: any PC with one of these takes no damage.
+-        meleeSlam8 = function(user, damage, immuneTraits)
+-            local dirs = { {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} }
++        -- Damages any LIVING pawn (has hp -- either faction, so e.g. a
++        -- treant standing next to another treant hits it too) in the 4
++        -- cardinal tiles surrounding `user` (Treant Slam). Non-living
++        -- pawns (stones/crates/gears) are untouched -- they have no hp to
++        -- damage. immuneTraits: a living pawn with any of these takes no
++        -- damage. Cage-enclosed targets are naturally excluded already:
++        -- if a closed cage sits between `user` and a would-be target,
++        -- that target simply isn't in one of these 4 adjacent tiles.
++        meleeSlam4 = function(user, damage, immuneTraits)
++            local dirs = { {0,-1}, {0,1}, {-1,0}, {1,0} }
+             local affected = {}
+             for _, d in ipairs(dirs) do
+                 local p = dplyr:getAt(user.col + d[1], user.row + d[2])
+-                if p and p.faction == "pc" then
++                if p and p.hp and p.id ~= user.id then
+                     local immune = false
+                     for _, t in ipairs(immuneTraits or {}) do
+                         if dplyr:hasTrait(p, t) then immune = true break end
+@@ -393,12 +399,22 @@ function chessUpdtr:buildCtx()
+         -- wall) and lands 2 tiles away, resolved via resolveJumpLanding
+         -- above. Returns {ok=false} without moving anything if either tile
+         -- along the way is a wall.
++        -- Throws `thrownPawn` 2 grids in direction (dCol,dRow): jumps clean
++        -- over the 1st grid (ignoring any pawn there, but not a wall) and
++        -- lands on the 2nd, resolved via resolveJumpLanding. If the 2nd
++        -- grid is a wall, throws 1 grid instead (landing on the 1st) rather
++        -- than failing outright -- but a wall on the 1st grid still blocks
++        -- the throw entirely, since there's nowhere left to land at all.
+         throwPawn = function(thrownPawn, dCol, dRow)
+             local x1c, x1r = thrownPawn.col + dCol, thrownPawn.row + dRow
+-            local x2c, x2r = thrownPawn.col + 2 * dCol, thrownPawn.row + 2 * dRow
+-            if not map:isWalkable(x1c, x1r, thrownPawn) or not map:isWalkable(x2c, x2r, thrownPawn) then
++            if not map:isWalkable(x1c, x1r, thrownPawn) then
+                 return { ok = false, reason = "throw blocked by a wall" }
+             end
++            local x2c, x2r = thrownPawn.col + 2 * dCol, thrownPawn.row + 2 * dRow
++            if not map:isWalkable(x2c, x2r, thrownPawn) then
++                resolveJumpLanding(thrownPawn, x1c, x1r, dCol, dRow, 1)
++                return { ok = true }
++            end
+             resolveJumpLanding(thrownPawn, x2c, x2r, dCol, dRow)
+             return { ok = true }
+         end,
+@@ -510,7 +526,7 @@ function chessUpdtr:endTurn()
+ end
+ 
+ -- Each enemy checks every ability it has for an aiPattern (see
+--- abltMng.TRIGGER's doc comment) and fires accordingly: "melee8" always
++-- abltMng.TRIGGER's doc comment) and fires accordingly: "melee4" always
+ -- fires (no targeting needed), "beam_pierce"/"beam_first" only fire if
+ -- findBeamTarget finds a clear line to a PC.
+ function chessUpdtr:runEnemyPhase()
+@@ -519,7 +535,7 @@ function chessUpdtr:runEnemyPhase()
+         if enemy.hp and enemy.hp > 0 then
+             for _, abilityId in ipairs(enemy.abilities or {}) do
+                 local def = abltMng.get(abilityId)
+-                if def and def.aiPattern == "melee8" then
++                if def and def.aiPattern == "melee4" then
+                     self:useAbility(enemy, abilityId, nil)
+                 elseif def and (def.aiPattern == "beam_pierce" or def.aiPattern == "beam_first") then
+                     local firedAt = self:findBeamTarget(enemy)
+diff --git a/modules/pawnCon.lua b/modules/pawnCon.lua
+index 6536fb7..c1230f4 100644
+--- a/modules/pawnCon.lua
++++ b/modules/pawnCon.lua
+@@ -40,12 +40,17 @@ function pawnCon.new(dplyrRef, mapRef, updtrRef, boardHitRect)
+ end
+ 
+ -- call once right after pawnDplyr:deploy() for every pawn that should be
+--- tappable (all of them -- enemies are tappable as ability targets too)
++-- tappable (all of them -- enemies are tappable for sidebar inspection
++-- too, see onPawnTap). Stashes the handler on the pawn itself so
++-- pawnDplyr:_applySprite can re-attach it whenever facing swaps the
++-- sprite object out from under it (see that function's comment).
+ function pawnCon:registerSelectable(pawn)
+-    pawn.sprite:addEventListener("tap", function(event)
++    local handler = function(event)
+         self:onPawnTap(pawn)
+         return true
+-    end)
++    end
++    pawn._tapHandler = handler
++    pawn.sprite:addEventListener("tap", handler)
+ end
+ 
+ -- ---------------------------------------------------------------- SELECT
+@@ -88,6 +93,30 @@ function pawnCon:cyclePCs(direction)
+     self:select(pcs[newIdx].id)
+ end
+ 
++-- Cycles through enemy pawns for sidebar inspection (see onPawnTap) --
++-- 'i'/'p' mirror how Q/E cycle PCs. Bound directly to those keys below
++-- rather than reusing Tab/Q/E, so cycling hostiles never fights with
++-- cycling your own PCs.
++function pawnCon:cycleHostiles(direction)
++    local enemies = self.dplyr:getAllByFaction("enemy")
++    if #enemies == 0 then return end
++    table.sort(enemies, function(a, b) return a.id < b.id end)
++
++    local idx = 1
++    for i, p in ipairs(enemies) do
++        if p.id == self.selectedId then idx = i break end
++    end
++    -- if a PC (or nothing) is currently selected, start from the first
++    -- hostile rather than wrapping relative to an index that isn't in
++    -- this list at all
++    local currentIsHostile = false
++    for _, p in ipairs(enemies) do
++        if p.id == self.selectedId then currentIsHostile = true break end
++    end
++    local newIdx = currentIsHostile and (((idx - 1 + direction) % #enemies) + 1) or 1
++    self:select(enemies[newIdx].id)
++end
++
+ -- ------------------------------------------------------------------ MODE
+ -- MOVE: tapping a tile moves the selected pawn there.
+ -- ABILITY: an ability is armed (self.pendingAbility); the next tap on a
+@@ -113,12 +142,18 @@ function pawnCon:beginAbility(abilityId)
+ end
+ 
+ -- ------------------------------------------------------------------ TAPS
++-- Tapping a PC selects it as normal. Tapping a hostile (when no ability is
++-- armed) also selects it -- not to command it (chessUpdtr's turn/faction
++-- check still refuses to move or act it), just so its info shows in the
++-- sidebar. Neutral pawns (stones/crates/gears) aren't selectable this way
++-- -- there's nothing to inspect on them. See also 'i'/'p' below for
++-- cycling hostiles by keyboard.
+ function pawnCon:onPawnTap(pawn)
+     if self.mode == pawnCon.MODE.ABILITY and self.pendingAbility then
+         self:resolveAbility(pawn)
+         return
+     end
+-    if pawn.faction == "pc" then
++    if pawn.faction == "pc" or pawn.faction == "enemy" then
+         self:select(pawn.id)
+     end
+ end
+@@ -192,6 +227,14 @@ function pawnCon:onKeyEvent(event)
+         self:cyclePCs(1) -- next PC
+         return true
+     end
++    if key == "i" then
++        self:cycleHostiles(1) -- next hostile
++        return true
++    end
++    if key == "p" then
++        self:cycleHostiles(-1) -- previous hostile
++        return true
++    end
+     local num = tonumber(key)
+     if num and num >= 1 and num <= 9 then
+         local pcs = self.dplyr:getAllByFaction("pc")
+diff --git a/modules/pawnDplyr.lua b/modules/pawnDplyr.lua
+index 1be6bd2..afb1c33 100644
+--- a/modules/pawnDplyr.lua
++++ b/modules/pawnDplyr.lua
+@@ -127,8 +127,9 @@ pawnDplyr.KIND_INFO = {
+         faction = pawnDplyr.FACTION.ENEMY,
+         name = "Wraith", hp = 3, abilities = { "fire_beam" }, traits = {},
+     },
+-    -- TREANT: stationary melee attacker -- every enemy turn, hits all 8
+-    -- surrounding tiles (see abltMng's "treant_slam", aiPattern "melee8").
++    -- TREANT: stationary melee attacker -- every enemy turn, hits any
++    -- living pawn (either faction) in the 4 cardinal-adjacent tiles (see
++    -- abltMng's "treant_slam", aiPattern "melee4").
+     -- Armor / Protected / Parry all grant immunity.
+     enemy_treant = {
+         images = {
+@@ -286,57 +287,6 @@ function pawnDplyr:_buildVisuals(pawn, info)
+     end
+ end
+ 
+--- ----------------------------------------------------------------- DEPLOY
+--- kind: key into KIND_INFO. opts: { faction override, hp override }
+-function pawnDplyr:deploy(kind, col, row, opts)
+-    opts = opts or {}
+-    local info = pawnDplyr.KIND_INFO[kind]
+-    assert(info, "pawnDplyr: unknown kind '" .. tostring(kind) .. "'")
+-
+-    local id = self.nextId
+-    self.nextId = self.nextId + 1
+-
+-    local faction = opts.faction or info.faction
+-
+-    local pawn = {
+-        id = id,
+-        kind = kind,
+-        subType = info.subType,
+-        name = info.name,
+-        faction = faction,
+-        hp = opts.hp or info.hp,
+-        maxHp = opts.hp or info.hp,
+-        abilities = info.abilities,
+-        movingAbility = info.movingAbility,
+-        traits = copyTraitSet(info.traits),
+-        col = col,
+-        row = row,
+-        isMovableOnly = info.isMovableOnly or info.isMechanism,
+-        statuses = {}, -- e.g. statuses.guarded = turnsRemaining; see chessUpdtr for buff/debuff shapes
+-        facing = DEFAULT_FACING[faction] or { 0, 1 },
+-    }
+-
+-    self:_buildVisuals(pawn, info)
+-
+-    -- facing indicator: a small triangle on a rotating sub-group so pawns
+-    -- with a facing-dependent ability (Swap) can actually be aimed by eye.
+-    -- Only living/actor pawns need this -- stones/crates/gears never move
+-    -- under their own power, so skip the visual clutter on them.
+-    if not pawn.isMovableOnly then
+-        local facingGroup = display.newGroup()
+-        container:insert(facingGroup)
+-        facingGroup.x, facingGroup.y = 0, 0
+-        local tip = size * 0.5
+-        local indicator = display.newPolygon(facingGroup, 0, 0,
+-            { tip, 0, tip - size * 0.16, size * 0.12, tip - size * 0.16, -size * 0.12 })
+-        indicator:setFillColor(1, 0.85, 0.3)
+-        indicator.strokeWidth = 1
+-        indicator:setStrokeColor(0.05, 0.05, 0.06)
+-        pawn.facingIndicator = facingGroup
+-        self:_applyFacingRotation(pawn)
+-    end
+-end
+-
+ -- ----------------------------------------------------------------- DEPLOY
+ -- kind: key into KIND_INFO. opts: { faction override, hp override }
+ function pawnDplyr:deploy(kind, col, row, opts)
+@@ -451,6 +401,11 @@ function pawnDplyr:_applySprite(pawn)
+     pawn.container:insert(1, sprite) -- keep it behind the HP label
+     pawn.sprite = sprite
+     if pawn.shadow then pawn.container:insert(1, pawn.shadow) end -- re-assert shadow-behind-sprite order
++    -- the OLD sprite object took its tap listener down with it when
++    -- removed -- re-attach the same stored handler (see
++    -- pawnCon:registerSelectable) to the new one, or clicking this pawn
++    -- would silently stop working the moment its facing changes.
++    if pawn._tapHandler then sprite:addEventListener("tap", pawn._tapHandler) end
+ end
+ 
+ -- Sets which way a pawn is looking (used by facing-dependent abilities
+@@ -538,36 +493,44 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
+     local x, y = self.map:gridToWorld(col, row)
+     local duration = opts.duration or 160
+     transition.cancel(pawn.container)
+-    transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })
+ 
+     -- Jump/air-state readability: Throw's own hop and a lightweight
+-    -- pawn's bounce-onward landing both pass opts.jump=true. The sprite
+-    -- visibly lifts and scales up, with a drop shadow fading in beneath
+-    -- it, then both settle back to normal on landing -- so a pawn mid-air
+-    -- reads differently from a normal step, push, pull, swap, or kick
+-    -- slide (none of which set opts.jump).
+-    if opts.jump and pawn.sprite and pawn.shadow then
+-        local size = self.map.tileSize
+-        local liftY = -size * 0.35
+-        local upTime = duration * 0.5
+-        local downTime = duration - upTime
+-        local sprite, shadow = pawn.sprite, pawn.shadow
+-        transition.cancel(sprite)
+-        transition.cancel(shadow)
+-        sprite.y, sprite.xScale, sprite.yScale = 0, 1, 1
+-        shadow.alpha = 0
+-        transition.to(sprite, {
+-            y = liftY, xScale = 1.18, yScale = 1.18, time = upTime, transition = easing.outQuad,
+-            onComplete = function()
+-                transition.to(sprite, { y = 0, xScale = 1, yScale = 1, time = downTime, transition = easing.inQuad })
+-            end,
+-        })
+-        transition.to(shadow, {
+-            alpha = 1, time = upTime, transition = easing.outQuad,
+-            onComplete = function()
+-                transition.to(shadow, { alpha = 0, time = downTime, transition = easing.inQuad })
+-            end,
+-        })
++    -- pawn's bounce-onward landing both pass opts.jump=true. A pawn mid-
++    -- air needs to read differently from a normal step, push, pull, swap,
++    -- or kick slide (none of which set opts.jump).
++    --
++    -- A custom easing function (Solar2D accepts any function shaped like
++    -- easing.*, not just the built-in presets) that rides `change` +
++    -- `begin` linearly like normal, plus a sine bump peaking at the
++    -- midpoint. sin's own derivative is continuous everywhere (unlike two
++    -- eased legs meeting at a peak, where velocity drops to ~0 on both
++    -- sides right at the join -- that's what read as a laggy little pause
++    -- at the top of the hop). One continuous tween per property, no
++    -- onComplete-chaining, no stutter.
++    local function sineBump(amplitude)
++        return function(t, tDuration, tBegin, tChange)
++            local p = math.min(1, t / tDuration)
++            return tBegin + tChange * p + math.sin(p * math.pi) * amplitude
++        end
++    end
++
++    if opts.jump then
++        local liftAmount = self.map.tileSize * 0.55
++        transition.to(pawn.container, { x = x, time = duration, transition = easing.inOutQuad })
++        transition.to(pawn.container, { y = y, time = duration, transition = sineBump(-liftAmount) })
++
++        if pawn.sprite and pawn.shadow then
++            local sprite, shadow = pawn.sprite, pawn.shadow
++            transition.cancel(sprite)
++            transition.cancel(shadow)
++            sprite.xScale, sprite.yScale = 1, 1
++            shadow.alpha = 0
++            transition.to(sprite, { xScale = 1, time = duration, transition = sineBump(0.18) })
++            transition.to(sprite, { yScale = 1, time = duration, transition = sineBump(0.18) })
++            transition.to(shadow, { alpha = 0, time = duration, transition = sineBump(1) })
++        end
++    else
++        transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })
+     end
+ 
+     Runtime:dispatchEvent({ name = "pawnMoved", pawnId = pawnId, col = col, row = row })
+@@ -595,11 +558,31 @@ function pawnDplyr:swapPawns(idA, idB)
+     Runtime:dispatchEvent({ name = "pawnMoved", pawnId = idB, col = aCol, row = aRow })
+ end
+ 
++-- Quick horizontal jitter feedback for "this pawn just got hit" -- see
++-- :applyDamage. Reads against the container's CURRENT x (captured once at
++-- the start) rather than an absolute stored position, so it composes
++-- fine even if a move happens to be resolving around the same moment.
++function pawnDplyr:shakePawn(pawnId)
++    local pawn = self.pawns[pawnId]
++    if not pawn or not pawn.container then return end
++    local c = pawn.container
++    local x0 = c.x
++    local amt = self.map.tileSize * 0.12
++    transition.to(c, { x = x0 - amt, time = 40, transition = easing.outQuad, onComplete = function()
++        if not pawn.container then return end
++        transition.to(c, { x = x0 + amt, time = 40, transition = easing.outQuad, onComplete = function()
++            if not pawn.container then return end
++            transition.to(c, { x = x0, time = 40, transition = easing.inQuad })
++        end })
++    end })
++end
++
+ function pawnDplyr:applyDamage(pawnId, amount)
+     local pawn = self.pawns[pawnId]
+     if not pawn or not pawn.hp then return end
+     pawn.hp = math.max(0, pawn.hp - amount)
+     if pawn.hpText then pawn.hpText.text = tostring(pawn.hp) end
++    self:shakePawn(pawnId)
+     if pawn.hp <= 0 then
+         self:remove(pawnId)
+         return true -- died
+diff --git a/tests/corona_stub.lua b/tests/corona_stub.lua
+index b39bb55..42ad916 100644
+--- a/tests/corona_stub.lua
++++ b/tests/corona_stub.lua
+@@ -81,7 +81,7 @@ function transition.to(obj, params)
+ end
+ function transition.cancel(obj) end
+ 
+-easing = { outQuad = "outQuad", inQuad = "inQuad" }
++easing = { outQuad = "outQuad", inQuad = "inQuad", inOutQuad = "inOutQuad" }
+ 
+ -- timer.performWithDelay applies immediately (no real async needed for
+ -- headless tests) -- mirrors transition.to's "apply immediately" stance.
+diff --git a/tests/smoke_test.lua b/tests/smoke_test.lua
+index 546781b..c26e1e7 100644
+--- a/tests/smoke_test.lua
++++ b/tests/smoke_test.lua
+@@ -13,6 +13,16 @@ local function line(msg) print("---- " .. msg .. " ----") end
+ abltMng.registerDefaults()
+ traitMng.registerDefaults()
+ 
++line("ABILITY TRIGGER CLASSIFICATION")
++for _, id in ipairs({ "fire_beam", "treant_slam", "acid_spit" }) do
++    assert(abltMng.get(id).trigger == abltMng.TRIGGER.ATTACK,
++        id .. " should be an ATTACK-trigger ability (shown as 'Attack' on the sidebar, not 'Active')")
++end
++for _, id in ipairs({ "push_all", "swap", "drag", "guard" }) do
++    assert(abltMng.get(id).trigger == abltMng.TRIGGER.ACTIVE, id .. " should still be a player-armed ACTIVE ability")
++end
++print("trigger classification OK: hostile auto-attacks are ATTACK, PC-armed abilities are still ACTIVE")
++
+ line("BUILD MAP")
+ local map = chessMap.new(sampleLevel.rows, { tileSize = 48, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
+ print(string.format("cols=%d rows=%d tileSize=%d spawnPCs=%d spawnEnemies=%d goals=%d",
+@@ -213,6 +223,22 @@ updtr:checkClearCondition()
+ assert(map:getTile(25, 14).type == "cage", "cage_b should close again once its button is vacated")
+ print("cage OK: both gates open on their own button and close independently when vacated")
+ 
++line("CAGE MECHANISM -- A CLOSED CAGE ACTUALLY BLOCKS A PAWN'S MOVE, NOT JUST isWalkable")
++assert(map:getTile(17, 13).type == "cage", "cage_a should be closed again (button was vacated above)")
++dplyr:moveTo(knight.id, 18, 13) -- just east of the closed cage tile
++local trappedOk = updtr:requestStep(knight, -1, 0) -- try to step west, into the closed cage
++assert(not trappedOk, "a pawn should be refused entry into a closed cage tile")
++assert(knight.col == 18 and knight.row == 13, "knight should not have moved -- still trapped on this side")
++dplyr:moveTo(mage.id, 16, 13) -- stand on cage_a's button to open it
++updtr:checkClearCondition()
++assert(map:getTile(17, 13).type == "cage_open", "cage_a should be open now")
++local freedOk = updtr:requestStep(knight, -1, 0)
++assert(freedOk, "once the cage is open, the same step should succeed")
++assert(knight.col == 17 and knight.row == 13, "knight should have moved onto the now-open cage tile")
++print("cage OK: closed cage refused the step; opening it let the identical step through")
++dplyr:moveTo(mage.id, 10, 13) -- off the button again, so it doesn't interfere with later tests
++updtr:checkClearCondition()
++
+ -- ------------------------------------------------------------- TURN CYCLE
+ line("TURN CYCLE / ENEMY AI PHASE")
+ local turnEvents = {}
+@@ -448,34 +474,77 @@ treant = dplyr:getById(treant.id)
+ spitter = dplyr:getById(spitter.id)
+ 
+ -- ------------------------------------------------------- TREANT SLAM
+-line("TREANT SLAM (melee8) -- HITS ALL 8 NEIGHBORS, ARMOR/PROTECTED/PARRY IMMUNE")
++line("TREANT SLAM (melee4) -- HITS ANY LIVING PAWN IN THE 4 CARDINAL TILES, EITHER FACTION")
++local brute = dplyr:getById(enemies[3].id) -- enemies[] wasn't refreshed after HISTORY like the named locals above -- re-fetch directly
+ dplyr:moveTo(treant.id, 5, 8) -- row 8 fully open, away from the mechanism/hazard tiles
+ for _, d in ipairs({ {-1,-1},{0,-1},{1,-1},{-1,0},{1,0},{-1,1},{0,1},{1,1} }) do
+     local occ = dplyr:getAt(5 + d[1], 8 + d[2])
+     if occ and occ.id ~= treant.id then dplyr:remove(occ.id) end
+ end
+-dplyr:moveTo(knight.id, 4, 7)    -- NW: no immunity
+-dplyr:moveTo(mage.id, 5, 7)      -- N: armor
+-dplyr:moveTo(guardian.id, 6, 7)  -- NE: protected
+-dplyr:moveTo(brawler.id, 4, 8)   -- W: parry
++dplyr:moveTo(mage.id, 5, 7)     -- N: armor
++dplyr:moveTo(guardian.id, 5, 9) -- S: protected
++dplyr:moveTo(brawler.id, 4, 8)  -- W: parry
++dplyr:moveTo(brute.id, 6, 8)    -- E: an ENEMY, no immunity -- proves the slam is faction-agnostic
++dplyr:moveTo(knight.id, 4, 7)   -- NW (diagonal): no immunity, but diagonals no longer count
+ dplyr:addTrait(mage.id, "armor")
+ dplyr:addTrait(guardian.id, "protected")
+ dplyr:addTrait(brawler.id, "parry")
+ 
+-local knightHp5, mageHp5, guardianHp5, brawlerHp5 = knight.hp, mage.hp, guardian.hp, brawler.hp
++local mageHp5, guardianHp5, brawlerHp5, bruteHp5, knightHp5 = mage.hp, guardian.hp, brawler.hp, brute.hp, knight.hp
+ updtr.turn = chessUpdtr.TURN.ENEMY -- treant_slam is an enemy ability; simulate enemy phase directly
+ local slamOk = updtr:useAbility(treant, "treant_slam", nil)
+ assert(slamOk, "treant_slam should execute")
+-assert(knight.hp == knightHp5 - 2, "unarmored knight should take slam damage")
+ assert(mage.hp == mageHp5, "armored mage should be immune to the slam")
+ assert(guardian.hp == guardianHp5, "protected guardian should be immune to the slam")
+ assert(brawler.hp == brawlerHp5, "parrying brawler should be immune to the slam")
+-print("treant_slam OK: knight hp", knightHp5, "->", knight.hp, "-- armor/protected/parry all held")
++assert(brute.hp == bruteHp5 - 2, "an unarmored ENEMY adjacent to the treant should also take damage -- the slam doesn't care about faction")
++assert(knight.hp == knightHp5, "a pawn only diagonally adjacent should NOT be hit -- melee4 is cardinal-only, no diagonals")
++print("treant_slam OK: N/S/W all immune as expected, E (an enemy) took", bruteHp5 - brute.hp, "damage, diagonal NW untouched")
++dplyr:moveTo(brute.id, 18, 10) -- back near its own spawn -- (6,8) is reused by later tests
+ updtr.turn = chessUpdtr.TURN.PC
+ dplyr:removeTrait(mage.id, "armor")
+ dplyr:removeTrait(guardian.id, "protected")
+ dplyr:removeTrait(brawler.id, "parry")
+ 
++line("TREANT SLAM -- THREE TREANTS IN A LINE ALL DAMAGE EACH OTHER")
++local treant2 = dplyr:deploy("enemy_treant", 12, 8)
++local treant3 = dplyr:deploy("enemy_treant", 13, 8)
++dplyr:moveTo(treant.id, 11, 8)
++local t1Hp, t2Hp, t3Hp = treant.hp, treant2.hp, treant3.hp
++updtr.turn = chessUpdtr.TURN.ENEMY -- treant_slam is an enemy ability; simulate enemy phase directly
++for _, t in ipairs({ treant, treant2, treant3 }) do
++    updtr:useAbility(t, "treant_slam", nil)
++end
++assert(treant.hp == t1Hp - 2, "end treant should take one hit from its only neighbor")
++assert(treant3.hp == t3Hp - 2, "the other end treant should also take one hit")
++assert(treant2.hp == t2Hp - 4, "the middle treant has neighbors on both sides -- should take two hits")
++print("treant_slam OK: line of 3 treants all damaged each other, middle one took", t2Hp - treant2.hp)
++dplyr:remove(treant2.id); dplyr:remove(treant3.id)
++updtr.turn = chessUpdtr.TURN.PC
++
++line("TREANT SLAM -- A CLOSED CAGE BLOCKS THE SLAM (A CAGED HOSTILE CAN'T ATTACK THROUGH IT)")
++knight.hp = knight.maxHp -- heal first -- accumulated damage from earlier tests could otherwise let this test's hit kill (and remove) it
++if knight.hpText then knight.hpText.text = tostring(knight.hp) end
++dplyr:moveTo(treant.id, 15, 8)
++dplyr:moveTo(knight.id, 17, 8) -- 2 tiles east -- an ad-hoc closed cage sits between them at (16,8)
++local originalTileType = map.tiles[8][16].type
++map.tiles[8][16].type = "cage" -- not tied to any button group -- just testing that ANY closed cage blocks
++map:refreshTile(16, 8)
++local cagedHpBefore = knight.hp
++updtr.turn = chessUpdtr.TURN.ENEMY
++updtr:useAbility(treant, "treant_slam", nil)
++assert(knight.hp == cagedHpBefore, "a pawn on the far side of a closed cage isn't adjacent -- the slam shouldn't reach it")
++map.tiles[8][16].type = originalTileType -- open it back up and move the PC to genuinely adjacent
++map:refreshTile(16, 8)
++dplyr:moveTo(knight.id, 16, 8)
++local cagedHpBefore2 = knight.hp
++updtr:useAbility(treant, "treant_slam", nil)
++assert(knight.hp == cagedHpBefore2 - 2, "once actually adjacent (cage out of the way), the identical slam connects")
++print("treant_slam OK: a closed cage blocked the attack; removing it let the same attack connect")
++knight.hp = knight.maxHp -- heal back -- knight accumulates damage across this whole file and later tests need it alive
++if knight.hpText then knight.hpText.text = tostring(knight.hp) end
++updtr.turn = chessUpdtr.TURN.PC
++
+ -- -------------------------------------------------------- ACID SPIT
+ line("ACID SPIT (beam_first) -- STOPS AT FIRST PAWN; PARRY DOES NOT HELP")
+ dplyr:moveTo(spitter.id, 2, 8)
+@@ -501,6 +570,30 @@ print("acid_spit OK: armored brawler took no damage; shot didn't pierce through
+ dplyr:removeTrait(brawler.id, "armor")
+ updtr.turn = chessUpdtr.TURN.PC
+ 
++line("ACID SPIT -- CAN'T SEE THROUGH A NON-LIVING PAWN (STONE/CRATE)")
++slinger.hp = slinger.maxHp -- heal first -- accumulated damage from earlier tests could otherwise let this test's hit kill (and remove) it
++if slinger.hpText then slinger.hpText.text = tostring(slinger.hp) end
++dplyr:moveTo(guardian.id, 22, 9) -- clear out of row 9 -- it was left at (5,9) by the earlier treant test
++dplyr:moveTo(spitter.id, 2, 9)
++dplyr:moveTo(slinger.id, 8, 9) -- would be a clear shot if nothing were in the way
++local blockerStone = dplyr:deploy("stone_a", 5, 9) -- a non-living pawn directly in the line
++local slingerHp8 = slinger.hp
++updtr.turn = chessUpdtr.TURN.ENEMY
++assert(updtr:findBeamTarget(spitter) == nil,
++    "a stone blocking the line means there's no valid target -- findBeamTarget should see nobody")
++updtr:runEnemyPhase() -- the automatic dispatch path should agree and do nothing
++assert(slinger.hp == slingerHp8, "the stone should have blocked the shot entirely -- slinger untouched")
++dplyr:remove(blockerStone.id)
++local firedAt = updtr:findBeamTarget(spitter)
++assert(firedAt and firedAt.col == slinger.col and firedAt.row == slinger.row,
++    "with the stone gone, the same line should be clear again")
++updtr:runEnemyPhase()
++assert(slinger.hp == slingerHp8 - 2, "with the line clear, the spitter should auto-fire and hit slinger")
++print("acid_spit OK: a stone fully blocked the shot; removing it let the spitter see and fire again")
++slinger.hp = slinger.maxHp -- heal back -- slinger accumulates damage across this file and later Throw tests need it alive
++if slinger.hpText then slinger.hpText.text = tostring(slinger.hp) end
++updtr.turn = chessUpdtr.TURN.PC
++
+ -- -------------------------------------------- GENERALIZED ENEMY AI DISPATCH
+ line("GENERALIZED ENEMY AI -- TREANT/SPITTER FIRE AUTOMATICALLY EACH ENEMY TURN")
+ -- heal knight/mage first -- they've accumulated damage from earlier tests
+@@ -606,6 +699,17 @@ assert(throwTarget3.col == 11 and throwTarget3.row == 6, "the stone should NOT h
+ print("throw OK: wall correctly blocked the jump, stone stayed at", throwTarget3.col)
+ dplyr:remove(throwTarget3.id)
+ 
++line("THROW -- WALL 2 GRIDS AWAY DEGRADES TO A 1-GRID THROW INSTEAD OF FAILING")
++dplyr:moveTo(slinger.id, 9, 6) -- row 6 has a wall at col 12; the 1st grid (11) is clear, only the 2nd (12) is the wall
++local throwTarget4 = dplyr:deploy("stone_a", 10, 6)
++local throwDegradeOk = updtr:requestStep(slinger, 1, 0)
++assert(throwDegradeOk, "requestStep should report ok -- the facing-trigger fired")
++assert(slinger.col == 9 and slinger.row == 6, "slinger should NOT move -- facing-trigger fires in place")
++assert(throwTarget4.col == 11 and throwTarget4.row == 6,
++    "wall 2 grids away should degrade to a 1-grid throw (landing on the 1st grid) instead of failing outright, got " .. throwTarget4.col)
++print("throw OK: wall 2 grids away degraded to a 1-grid throw, stone landed at", throwTarget4.col)
++dplyr:remove(throwTarget4.id)
++
+ -- ------------------------------------------- JUMP-LANDING RESOLUTION TABLE
+ line("JUMP LANDING -- CASE A: ARMORED JUMPER CRUSHES THE BED PAWN")
+ dplyr:moveTo(slinger.id, 3, 8)

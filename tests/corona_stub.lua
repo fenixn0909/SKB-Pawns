@@ -81,7 +81,7 @@ function transition.to(obj, params)
 end
 function transition.cancel(obj) end
 
-easing = { outQuad = "outQuad", inQuad = "inQuad" }
+easing = { outQuad = "outQuad", inQuad = "inQuad", inOutQuad = "inOutQuad" }
 
 -- timer.performWithDelay applies immediately (no real async needed for
 -- headless tests) -- mirrors transition.to's "apply immediately" stance.

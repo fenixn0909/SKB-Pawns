@@ -399,11 +399,21 @@ function chessUpdtr:buildCtx()
         -- wall) and lands 2 tiles away, resolved via resolveJumpLanding
         -- above. Returns {ok=false} without moving anything if either tile
         -- along the way is a wall.
+        -- Throws `thrownPawn` 2 grids in direction (dCol,dRow): jumps clean
+        -- over the 1st grid (ignoring any pawn there, but not a wall) and
+        -- lands on the 2nd, resolved via resolveJumpLanding. If the 2nd
+        -- grid is a wall, throws 1 grid instead (landing on the 1st) rather
+        -- than failing outright -- but a wall on the 1st grid still blocks
+        -- the throw entirely, since there's nowhere left to land at all.
         throwPawn = function(thrownPawn, dCol, dRow)
             local x1c, x1r = thrownPawn.col + dCol, thrownPawn.row + dRow
-            local x2c, x2r = thrownPawn.col + 2 * dCol, thrownPawn.row + 2 * dRow
-            if not map:isWalkable(x1c, x1r, thrownPawn) or not map:isWalkable(x2c, x2r, thrownPawn) then
+            if not map:isWalkable(x1c, x1r, thrownPawn) then
                 return { ok = false, reason = "throw blocked by a wall" }
+            end
+            local x2c, x2r = thrownPawn.col + 2 * dCol, thrownPawn.row + 2 * dRow
+            if not map:isWalkable(x2c, x2r, thrownPawn) then
+                resolveJumpLanding(thrownPawn, x1c, x1r, dCol, dRow, 1)
+                return { ok = true }
             end
             resolveJumpLanding(thrownPawn, x2c, x2r, dCol, dRow)
             return { ok = true }

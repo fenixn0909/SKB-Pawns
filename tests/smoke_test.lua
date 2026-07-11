@@ -13,6 +13,16 @@ local function line(msg) print("---- " .. msg .. " ----") end
 abltMng.registerDefaults()
 traitMng.registerDefaults()
 
+line("ABILITY TRIGGER CLASSIFICATION")
+for _, id in ipairs({ "fire_beam", "treant_slam", "acid_spit" }) do
+    assert(abltMng.get(id).trigger == abltMng.TRIGGER.ATTACK,
+        id .. " should be an ATTACK-trigger ability (shown as 'Attack' on the sidebar, not 'Active')")
+end
+for _, id in ipairs({ "push_all", "swap", "drag", "guard" }) do
+    assert(abltMng.get(id).trigger == abltMng.TRIGGER.ACTIVE, id .. " should still be a player-armed ACTIVE ability")
+end
+print("trigger classification OK: hostile auto-attacks are ATTACK, PC-armed abilities are still ACTIVE")
+
 line("BUILD MAP")
 local map = chessMap.new(sampleLevel.rows, { tileSize = 48, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
 print(string.format("cols=%d rows=%d tileSize=%d spawnPCs=%d spawnEnemies=%d goals=%d",
@@ -688,6 +698,17 @@ assert(slinger.col == 10 and slinger.row == 6, "slinger should NOT move -- facin
 assert(throwTarget3.col == 11 and throwTarget3.row == 6, "the stone should NOT have been thrown -- a wall blocks the jump")
 print("throw OK: wall correctly blocked the jump, stone stayed at", throwTarget3.col)
 dplyr:remove(throwTarget3.id)
+
+line("THROW -- WALL 2 GRIDS AWAY DEGRADES TO A 1-GRID THROW INSTEAD OF FAILING")
+dplyr:moveTo(slinger.id, 9, 6) -- row 6 has a wall at col 12; the 1st grid (11) is clear, only the 2nd (12) is the wall
+local throwTarget4 = dplyr:deploy("stone_a", 10, 6)
+local throwDegradeOk = updtr:requestStep(slinger, 1, 0)
+assert(throwDegradeOk, "requestStep should report ok -- the facing-trigger fired")
+assert(slinger.col == 9 and slinger.row == 6, "slinger should NOT move -- facing-trigger fires in place")
+assert(throwTarget4.col == 11 and throwTarget4.row == 6,
+    "wall 2 grids away should degrade to a 1-grid throw (landing on the 1st grid) instead of failing outright, got " .. throwTarget4.col)
+print("throw OK: wall 2 grids away degraded to a 1-grid throw, stone landed at", throwTarget4.col)
+dplyr:remove(throwTarget4.id)
 
 -- ------------------------------------------- JUMP-LANDING RESOLUTION TABLE
 line("JUMP LANDING -- CASE A: ARMORED JUMPER CRUSHES THE BED PAWN")

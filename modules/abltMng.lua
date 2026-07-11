@@ -63,10 +63,13 @@ abltMng.TRIGGER = {
     MOVING  = "moving",
     FACING  = "facing",
     FLOW    = "flow",
+    ATTACK  = "attack",
 }
 
 -- Optional, enemy-only: how chessUpdtr's automatic enemy AI phase decides
--- whether/how to fire an ACTIVE ability without a player picking a target.
+-- whether/how to fire an ATTACK-trigger ability without a player picking a
+-- target -- these fire every enemy turn on their own, checking their own
+-- vision/range for a living PC each time.
 --   "beam_pierce" -- fire_beam's pattern: aim at any PC sharing a clear
 --                    row/column, damage runs through everyone on the line.
 --   "beam_first"  -- acid_spit's pattern: same aiming, but the shot stops
@@ -174,7 +177,7 @@ function abltMng.registerDefaults()
         name = "Fire Beam",
         description = "Damage everything in a straight line until a wall.",
         targeting = abltMng.TARGETING.DIRECTION_TILE,
-        trigger = abltMng.TRIGGER.ACTIVE,
+        trigger = abltMng.TRIGGER.ATTACK,
         aiPattern = "beam_pierce",
         apCost = 1,
         execute = function(user, targetTile, ctx)
@@ -204,7 +207,7 @@ function abltMng.registerDefaults()
         name = "Treant Slam",
         description = "Damages any living pawn in the 4 cardinal-adjacent tiles, either faction. Armor, Protected, and Parry all grant immunity.",
         targeting = abltMng.TARGETING.NONE,
-        trigger = abltMng.TRIGGER.ACTIVE,
+        trigger = abltMng.TRIGGER.ATTACK,
         aiPattern = "melee4",
         apCost = 1,
         execute = function(user, _target, ctx)
@@ -222,7 +225,7 @@ function abltMng.registerDefaults()
         name = "Acid Spit",
         description = "Damages the first non-immune pawn in a clear line. Armor and Protected grant immunity.",
         targeting = abltMng.TARGETING.DIRECTION_TILE,
-        trigger = abltMng.TRIGGER.ACTIVE,
+        trigger = abltMng.TRIGGER.ATTACK,
         aiPattern = "beam_first",
         apCost = 1,
         execute = function(user, targetTile, ctx)
