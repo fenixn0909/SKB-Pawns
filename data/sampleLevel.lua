@@ -6,11 +6,18 @@
         # wall   P PC spawn   E enemy spawn   M mechanism   G goal
         ~ hazard (sinking)    J jail bars     H wall w/ tiny hole
         T tunnel (paired by id -- see sampleLevel.tunnels)
+        C cage (blocks like a wall until its button is held)
+        B cage button (any pawn standing here opens its paired cage(s) --
+          see sampleLevel.cages)
 
     Original room (cols 1-20): three PCs start on the west wall, three
-    enemies watch the east side, a gear mechanism sits center-left, and the
-    goal tile is ringed by hazard tiles that sink into the void after a
-    few turns.
+    enemies watch the east side, a gear mechanism sits center-left, and one
+    of the three goal tiles is ringed by hazard tiles that sink into the
+    void after a few turns. The stage clears once a PC is standing on all
+    3 goal tiles at once (see chessUpdtr:checkClearCondition). A cage gate
+    (2 independent sets) blocks a couple of side tiles until a pawn --
+    any pawn -- stands on its pressure-plate button; step off and the cage
+    closes again (see chessUpdtr:tickCages).
 
     Annex (cols 22-32, past the dividing wall at col 21): a small sealed
     vault (rows 7-9, cols 26-28) only reachable by a Tiny Size pawn --
@@ -38,8 +45,8 @@ sampleLevel.rows = {
     "#............~~~.E.##..........#",
     "#............~G~...##........E.#",
     "#.....#......~~~...##..........#",
-    "#.....#............##........E.#",
-    "#..................##..........#",
+    "#.....#........BC..##...G....E.#",
+    "#........G.........##..BC......#",
     "################################",
 }
 
@@ -60,6 +67,18 @@ sampleLevel.assignments = {
 sampleLevel.tunnels = {
     { id = "vault", col = 23, row = 6 },
     { id = "vault", col = 27, row = 8 },
+}
+
+-- Cage pairing: two independent button+cage sets. Each is one button tile
+-- and one cage tile, but a group can hold several of either (list them
+-- all under the same id) -- e.g. a 2-tile-wide gate, or two buttons that
+-- both open the same cage.
+sampleLevel.cages = {
+    { id = "cage_a", kind = "button", col = 16, row = 13 },
+    { id = "cage_a", kind = "cage",   col = 17, row = 13 },
+
+    { id = "cage_b", kind = "button", col = 24, row = 14 },
+    { id = "cage_b", kind = "cage",   col = 25, row = 14 },
 }
 
 -- pawns placed directly by coordinate rather than through the map legend

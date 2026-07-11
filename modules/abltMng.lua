@@ -36,6 +36,18 @@ abltMng.TARGETING = {
 --              via pawn.movingAbility (see pawnDplyr.KIND_INFO). Replaces
 --              baseline one-tile movement for that pawn; see
 --              chessUpdtr:requestStep. execute(user, {dCol,dRow}, ctx).
+--   FACING  -- also fires off pawn.movingAbility/directional input, but
+--              doesn't require moving at all: the pawn's facing updates
+--              (as it always does on directional input) and, if there's
+--              a pawn immediately adjacent in that direction, the ability
+--              triggers on it in place. If nothing's there, it falls back
+--              to a normal one-tile step, same as MOVING's fallback
+--              abilities do. execute(user, {dCol,dRow}, ctx) -- same
+--              signature as MOVING, dispatched identically by
+--              chessUpdtr:requestStep; the difference is entirely in what
+--              the execute function itself checks (adjacency-before-move
+--              instead of step-then-check-new-adjacency). Kick/Kick+/Throw
+--              use this.
 --   FLOW    -- fires as a *reaction* to being moved by someone/something
 --              else (pushed, dragged, swapped). Pull/Pull+'s chain effect
 --              on the pawn behind the mover is the current example, but
@@ -49,6 +61,7 @@ abltMng.TRIGGER = {
     ACTIVE  = "active",
     PASSIVE = "passive",
     MOVING  = "moving",
+    FACING  = "facing",
     FLOW    = "flow",
 }
 
@@ -360,70 +373,70 @@ function abltMng.registerDefaults()
         end,
     })
 
-    -- KICK (Moving): step forward normally, then whoever's now in your
-    -- facing direction gets kicked -- they slide until blocked by a wall
-    -- or another pawn (unlimited distance). The kicked pawn's own facing
-    -- never changes.
+    -- KICK (Facing): press a direction; if a pawn is immediately adjacent
+    -- that way, it's kicked in place -- no move -- and slides until
+    -- blocked by a wall or another pawn (unlimited distance). The kicked
+    -- pawn's own facing never changes. If nothing's adjacent, falls back
+    -- to a normal one-tile step (like Swap's fallback).
     abltMng.register({
         id = "kick",
-        name = "Kick (Moving)",
-        trigger = abltMng.TRIGGER.MOVING,
-        description = "Step forward normally; the pawn now in your facing direction is kicked and slides until blocked. Its facing doesn't change.",
+        name = "Kick (Facing)",
+        trigger = abltMng.TRIGGER.FACING,
+        description = "Face a direction; a pawn immediately adjacent that way is kicked in place and slides until blocked. Its facing doesn't change. Falls back to a normal step if nothing's there.",
         execute = function(user, moveVec, ctx)
             local dCol, dRow = moveVec.dCol, moveVec.dRow
-            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
             local nc, nr = user.col + dCol, user.row + dRow
-            local kicked = {}
             if ctx.getAt(nc, nr) then
-                kicked = ctx.kickChain(nc, nr, dCol, dRow, false)
+                local kicked = ctx.kickChain(nc, nr, dCol, dRow, false)
+                local ids = {}
+                for _, p in ipairs(kicked) do table.insert(ids, p.id) end
+                return { ok = true, affectedIds = ids }
             end
-            local ids = {}
-            for _, p in ipairs(kicked) do table.insert(ids, p.id) end
-            return { ok = true, affectedIds = ids }
+            return { ok = ctx.stepIfClear(user, dCol, dRow) }
         end,
     })
 
-    -- KICK+ (Moving): same, but kicks every pawn lined up in your facing
+    -- KICK+ (Facing): same, but kicks every pawn lined up in your facing
     -- direction, not just the first -- each slides independently, farthest
     -- one first so nobody transiently overlaps mid-resolution.
     abltMng.register({
         id = "kick_plus",
-        name = "Kick+ (Moving)",
-        trigger = abltMng.TRIGGER.MOVING,
-        description = "Like Kick, but kicks every pawn lined up in your facing direction, not just the first.",
+        name = "Kick+ (Facing)",
+        trigger = abltMng.TRIGGER.FACING,
+        description = "Like Kick, but kicks every pawn lined up in your facing direction, not just the first. Falls back to a normal step if nothing's there.",
         execute = function(user, moveVec, ctx)
             local dCol, dRow = moveVec.dCol, moveVec.dRow
-            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
             local nc, nr = user.col + dCol, user.row + dRow
-            local kicked = {}
             if ctx.getAt(nc, nr) then
-                kicked = ctx.kickChain(nc, nr, dCol, dRow, true)
+                local kicked = ctx.kickChain(nc, nr, dCol, dRow, true)
+                local ids = {}
+                for _, p in ipairs(kicked) do table.insert(ids, p.id) end
+                return { ok = true, affectedIds = ids }
             end
-            local ids = {}
-            for _, p in ipairs(kicked) do table.insert(ids, p.id) end
-            return { ok = true, affectedIds = ids }
+            return { ok = ctx.stepIfClear(user, dCol, dRow) }
         end,
     })
 
-    -- THROW (Moving): step forward normally, then the pawn now adjacent in
-    -- your facing direction is thrown -- it jumps over the 1st grid beyond
-    -- it (ignoring any pawn there, but not a wall) and lands on the 2nd.
-    -- If it lands on an occupied tile, see chessUpdtr's
+    -- THROW (Facing): press a direction; if a pawn is immediately adjacent
+    -- that way, it's thrown in place -- no move -- jumping over the 1st
+    -- grid beyond it (ignoring any pawn there, but not a wall) and landing
+    -- on the 2nd. If it lands on an occupied tile, see chessUpdtr's
     -- resolveJumpLanding (Armor/Protected/Spike-Headed/Lightweight
-    -- interactions).
+    -- interactions). Falls back to a normal step if nothing's adjacent.
     abltMng.register({
         id = "throw",
-        name = "Throw (Moving)",
-        trigger = abltMng.TRIGGER.MOVING,
-        description = "Step forward normally; the pawn now adjacent in your facing direction is thrown 2 tiles (jumping over the 1st, landing on the 2nd).",
+        name = "Throw (Facing)",
+        trigger = abltMng.TRIGGER.FACING,
+        description = "Face a direction; a pawn immediately adjacent that way is thrown 2 tiles in place (jumping over the 1st, landing on the 2nd). Falls back to a normal step if nothing's there.",
         execute = function(user, moveVec, ctx)
             local dCol, dRow = moveVec.dCol, moveVec.dRow
-            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
             local target = ctx.getAt(user.col + dCol, user.row + dRow)
-            if not target then return { ok = true } end -- moved, nothing there to throw
-            local result = ctx.throwPawn(target, dCol, dRow)
-            if result.ok == false then return { ok = true, reason = result.reason } end -- the move itself still succeeded
-            return { ok = true, affectedIds = { target.id } }
+            if target then
+                local result = ctx.throwPawn(target, dCol, dRow)
+                if result.ok == false then return { ok = true, reason = result.reason } end
+                return { ok = true, affectedIds = { target.id } }
+            end
+            return { ok = ctx.stepIfClear(user, dCol, dRow) }
         end,
     })
 end

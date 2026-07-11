@@ -1,0 +1,1121 @@
+diff --git a/data/sampleLevel.lua b/data/sampleLevel.lua
+index 7c9cab2..722a955 100644
+--- a/data/sampleLevel.lua
++++ b/data/sampleLevel.lua
+@@ -6,11 +6,18 @@
+         # wall   P PC spawn   E enemy spawn   M mechanism   G goal
+         ~ hazard (sinking)    J jail bars     H wall w/ tiny hole
+         T tunnel (paired by id -- see sampleLevel.tunnels)
++        C cage (blocks like a wall until its button is held)
++        B cage button (any pawn standing here opens its paired cage(s) --
++          see sampleLevel.cages)
+ 
+     Original room (cols 1-20): three PCs start on the west wall, three
+-    enemies watch the east side, a gear mechanism sits center-left, and the
+-    goal tile is ringed by hazard tiles that sink into the void after a
+-    few turns.
++    enemies watch the east side, a gear mechanism sits center-left, and one
++    of the three goal tiles is ringed by hazard tiles that sink into the
++    void after a few turns. The stage clears once a PC is standing on all
++    3 goal tiles at once (see chessUpdtr:checkClearCondition). A cage gate
++    (2 independent sets) blocks a couple of side tiles until a pawn --
++    any pawn -- stands on its pressure-plate button; step off and the cage
++    closes again (see chessUpdtr:tickCages).
+ 
+     Annex (cols 22-32, past the dividing wall at col 21): a small sealed
+     vault (rows 7-9, cols 26-28) only reachable by a Tiny Size pawn --
+@@ -38,8 +45,8 @@ sampleLevel.rows = {
+     "#............~~~.E.##..........#",
+     "#............~G~...##........E.#",
+     "#.....#......~~~...##..........#",
+-    "#.....#............##........E.#",
+-    "#..................##..........#",
++    "#.....#........BC..##...G....E.#",
++    "#........G.........##..BC......#",
+     "################################",
+ }
+ 
+@@ -62,6 +69,18 @@ sampleLevel.tunnels = {
+     { id = "vault", col = 27, row = 8 },
+ }
+ 
++-- Cage pairing: two independent button+cage sets. Each is one button tile
++-- and one cage tile, but a group can hold several of either (list them
++-- all under the same id) -- e.g. a 2-tile-wide gate, or two buttons that
++-- both open the same cage.
++sampleLevel.cages = {
++    { id = "cage_a", kind = "button", col = 16, row = 13 },
++    { id = "cage_a", kind = "cage",   col = 17, row = 13 },
++
++    { id = "cage_b", kind = "button", col = 24, row = 14 },
++    { id = "cage_b", kind = "cage",   col = 25, row = 14 },
++}
++
+ -- pawns placed directly by coordinate rather than through the map legend
+ -- (crates/extra mechanisms aren't "spawn points" -- they're just set dressing)
+ --
+diff --git a/main.lua b/main.lua
+index c53dc52..6c4dad6 100644
+--- a/main.lua
++++ b/main.lua
+@@ -27,34 +27,43 @@ traitMng.registerDefaults()
+ 
+ -- ------------------------------------------------------------------ TITLE
+ local titleText = display.newText({
+-    text = "SKB PAWNS", x = display.contentCenterX, y = 18,
++    text = "SKB PAWNS", x = display.screenOriginX + display.actualContentWidth / 2, y = 18,
+     font = native.systemFontBold, fontSize = 20,
+ })
+ titleText:setFillColor(0.85, 0.85, 0.95)
+ 
+ -- -------------------------------------------------------------- BOARD/MAP
+--- Tile size is computed so the entire map fits inside the board area.
+--- No camera panning needed -- the map sits centered in the board.
+-local BOARD_X, BOARD_Y = 8, 40
++-- The board viewport spans the device's *actual* content area (not the
++-- fixed 480x320 letterboxed content rect), so the map fills the real
++-- screen instead of sitting in a small centered box. Tile size is fixed
++-- rather than shrunk to force-fit the whole map -- that's what made the
++-- board look tiny -- so the camera actually pans/zooms as designed.
++local SCREEN_X, SCREEN_Y = display.screenOriginX, display.screenOriginY
++local SCREEN_W, SCREEN_H = display.actualContentWidth, display.actualContentHeight
++
++local BOARD_X, BOARD_Y = SCREEN_X + 8, SCREEN_Y + 40
+ local SIDEBAR_W = 150
+-local SIDEBAR_X = display.contentWidth - SIDEBAR_W
++local SIDEBAR_X = (SCREEN_X + SCREEN_W) - SIDEBAR_W
+ local BOARD_W = SIDEBAR_X - BOARD_X - 8
+-local BOARD_H = display.contentHeight - BOARD_Y - 10
++local BOARD_H = (SCREEN_Y + SCREEN_H) - BOARD_Y - 10
+ 
+-local NUM_COLS = #sampleLevel.rows[1]
+-local NUM_ROWS = #sampleLevel.rows
+-local TILE_SIZE = math.floor(math.min(BOARD_W / NUM_COLS, BOARD_H / NUM_ROWS))
++local TILE_SIZE = 48
+ 
+-local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE, tunnels = sampleLevel.tunnels })
++local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
+ 
+--- Board background: fills the board area so any map underflow is clean.
++-- Board background: fills the whole viewport so any map underflow is clean.
+ local boardBg = display.newRect(BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2, BOARD_W, BOARD_H)
+ boardBg:setFillColor(0.05, 0.05, 0.07)
+ 
+--- worldGroup holds everything board-related (tiles, tap rect, pawns).
+--- It sits directly on stage; the sidebar and title overlay on top handle
+--- any right/top overflow. No container clipping needed.
++-- Viewport container: clips worldGroup to the board area and sits at the
++-- viewport's screen center, so world point (0,0) in camera math maps to
++-- that screen center -- see modules/camera.lua's docstring. worldGroup
++-- holds everything board-related (tiles, tap rect, pawns).
++local boardContainer = display.newContainer(BOARD_W, BOARD_H)
++boardContainer.x, boardContainer.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
++
+ local worldGroup = display.newGroup()
++boardContainer:insert(worldGroup)
+ 
+ map:draw(worldGroup)
+ 
+@@ -72,8 +81,7 @@ local cam = camera.new({
+     worldGroup = worldGroup,
+     worldW = map.pixelW, worldH = map.pixelH,
+     viewportW = BOARD_W, viewportH = BOARD_H,
+-    boardCenterX = BOARD_X + BOARD_W / 2,
+-    boardCenterY = BOARD_Y + BOARD_H / 2,
++    boardCenterX = 0, boardCenterY = 0, -- container already centers on screen
+     panTime = 180,
+ })
+ 
+@@ -130,6 +138,21 @@ local modeLabel = display.newText({
+ })
+ modeLabel:setFillColor(0.6, 0.85, 1)
+ 
++-- Selected pawn's full kit: its Move/Facing-trigger ability (the one
++-- wired to movingAbility -- Push/Pull/Kick/Throw/Swap), its Active/
++-- Passive/Flow abilities (pawn.abilities, split by abltMng.TRIGGER), and
++-- its Traits (pawn.traits, via traitMng). Passive/Flow will read "--" for
++-- every pawn today since no default ability registers with those
++-- triggers yet (see abltMng.lua's taxonomy comment) -- the rows are here
++-- so they display the moment one exists.
++local abilitiesText = display.newText({
++    parent = sidebarGroup, text = "",
++    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 108, font = native.systemFont, fontSize = 11,
++    width = SIDEBAR_W - 16,
++})
++abilitiesText.anchorY = 0
++abilitiesText:setFillColor(0.8, 0.8, 0.87)
++
+ local logText = display.newText({
+     parent = sidebarGroup, text = "",
+     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 90, font = native.systemFont, fontSize = 12,
+@@ -154,11 +177,53 @@ local function updateSelectedLabel(pawn)
+     selectedLabel.text = string.format("%s\nHP %s", pawn.name, hpText)
+ end
+ 
++local function namesOrDash(names)
++    if #names == 0 then return "--" end
++    return table.concat(names, ", ")
++end
++
++local function updateAbilitiesLabel(pawn)
++    if not pawn then
++        abilitiesText.text = ""
++        return
++    end
++
++    local moveDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
++
++    local activeNames, passiveNames, flowNames = {}, {}, {}
++    for _, id in ipairs(pawn.abilities or {}) do
++        local def = abltMng.get(id)
++        if def then
++            if def.trigger == abltMng.TRIGGER.PASSIVE then
++                table.insert(passiveNames, def.name)
++            elseif def.trigger == abltMng.TRIGGER.FLOW then
++                table.insert(flowNames, def.name)
++            else
++                table.insert(activeNames, def.name)
++            end
++        end
++    end
++
++    local traitNames = {}
++    for traitId in pairs(pawn.traits or {}) do
++        local def = traitMng.get(traitId)
++        table.insert(traitNames, def and def.name or traitId)
++    end
++    table.sort(traitNames)
++
++    abilitiesText.text = string.format(
++        "Move: %s\nActive: %s\nPassive: %s\nFlow: %s\nTraits: %s",
++        moveDef and moveDef.name or "--",
++        namesOrDash(activeNames), namesOrDash(passiveNames), namesOrDash(flowNames),
++        namesOrDash(traitNames)
++    )
++end
++
+ -- small show/hide toggle for the sidebar, pinned outside sidebarGroup so
+ -- it stays put (and tappable) even while the sidebar itself is hidden
+ local sidebarVisible = true
+ local toggleBtn = display.newGroup()
+-local TOGGLE_X, TOGGLE_Y = display.contentWidth - 20, 20
++local TOGGLE_X, TOGGLE_Y = SCREEN_X + SCREEN_W - 20, 20
+ local toggleBg = display.newRoundedRect(toggleBtn, TOGGLE_X, TOGGLE_Y, 28, 28, 6)
+ toggleBg:setFillColor(0.2, 0.2, 0.26)
+ toggleBg.strokeWidth = 1
+@@ -214,6 +279,7 @@ updtr.onStateChanged = function() history:snapshot() end
+ Runtime:addEventListener("pawnSelected", function(event)
+     local pawn = dplyr:getById(event.pawnId)
+     updateSelectedLabel(pawn)
++    updateAbilitiesLabel(pawn)
+     if pawn then focusCameraOnGrid(pawn.col, pawn.row) end
+ end)
+ 
+@@ -224,6 +290,12 @@ Runtime:addEventListener("pawnMoved", function(event)
+     updateSelectedLabel(con:getSelected())
+ end)
+ 
++Runtime:addEventListener("traitChanged", function(event)
++    if event.pawnId == con.selectedId then
++        updateAbilitiesLabel(con:getSelected())
++    end
++end)
++
+ Runtime:addEventListener("controlModeChanged", function(event)
+     if event.mode == "ability" then
+         local def = abltMng.get(event.abilityId)
+@@ -241,6 +313,7 @@ end)
+ Runtime:addEventListener("abilityResolved", function(event)
+     logText.text = event.success and "Ability resolved." or "Ability failed / invalid target."
+     updateSelectedLabel(con:getSelected())
++    updateAbilitiesLabel(con:getSelected())
+ end)
+ 
+ Runtime:addEventListener("levelCleared", function()
+diff --git a/modules/abltMng.lua b/modules/abltMng.lua
+index dde4278..1eaf35c 100644
+--- a/modules/abltMng.lua
++++ b/modules/abltMng.lua
+@@ -36,6 +36,18 @@ abltMng.TARGETING = {
+ --              via pawn.movingAbility (see pawnDplyr.KIND_INFO). Replaces
+ --              baseline one-tile movement for that pawn; see
+ --              chessUpdtr:requestStep. execute(user, {dCol,dRow}, ctx).
++--   FACING  -- also fires off pawn.movingAbility/directional input, but
++--              doesn't require moving at all: the pawn's facing updates
++--              (as it always does on directional input) and, if there's
++--              a pawn immediately adjacent in that direction, the ability
++--              triggers on it in place. If nothing's there, it falls back
++--              to a normal one-tile step, same as MOVING's fallback
++--              abilities do. execute(user, {dCol,dRow}, ctx) -- same
++--              signature as MOVING, dispatched identically by
++--              chessUpdtr:requestStep; the difference is entirely in what
++--              the execute function itself checks (adjacency-before-move
++--              instead of step-then-check-new-adjacency). Kick/Kick+/Throw
++--              use this.
+ --   FLOW    -- fires as a *reaction* to being moved by someone/something
+ --              else (pushed, dragged, swapped). Pull/Pull+'s chain effect
+ --              on the pawn behind the mover is the current example, but
+@@ -49,6 +61,7 @@ abltMng.TRIGGER = {
+     ACTIVE  = "active",
+     PASSIVE = "passive",
+     MOVING  = "moving",
++    FACING  = "facing",
+     FLOW    = "flow",
+ }
+ 
+@@ -360,70 +373,70 @@ function abltMng.registerDefaults()
+         end,
+     })
+ 
+-    -- KICK (Moving): step forward normally, then whoever's now in your
+-    -- facing direction gets kicked -- they slide until blocked by a wall
+-    -- or another pawn (unlimited distance). The kicked pawn's own facing
+-    -- never changes.
++    -- KICK (Facing): press a direction; if a pawn is immediately adjacent
++    -- that way, it's kicked in place -- no move -- and slides until
++    -- blocked by a wall or another pawn (unlimited distance). The kicked
++    -- pawn's own facing never changes. If nothing's adjacent, falls back
++    -- to a normal one-tile step (like Swap's fallback).
+     abltMng.register({
+         id = "kick",
+-        name = "Kick (Moving)",
+-        trigger = abltMng.TRIGGER.MOVING,
+-        description = "Step forward normally; the pawn now in your facing direction is kicked and slides until blocked. Its facing doesn't change.",
++        name = "Kick (Facing)",
++        trigger = abltMng.TRIGGER.FACING,
++        description = "Face a direction; a pawn immediately adjacent that way is kicked in place and slides until blocked. Its facing doesn't change. Falls back to a normal step if nothing's there.",
+         execute = function(user, moveVec, ctx)
+             local dCol, dRow = moveVec.dCol, moveVec.dRow
+-            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+             local nc, nr = user.col + dCol, user.row + dRow
+-            local kicked = {}
+             if ctx.getAt(nc, nr) then
+-                kicked = ctx.kickChain(nc, nr, dCol, dRow, false)
++                local kicked = ctx.kickChain(nc, nr, dCol, dRow, false)
++                local ids = {}
++                for _, p in ipairs(kicked) do table.insert(ids, p.id) end
++                return { ok = true, affectedIds = ids }
+             end
+-            local ids = {}
+-            for _, p in ipairs(kicked) do table.insert(ids, p.id) end
+-            return { ok = true, affectedIds = ids }
++            return { ok = ctx.stepIfClear(user, dCol, dRow) }
+         end,
+     })
+ 
+-    -- KICK+ (Moving): same, but kicks every pawn lined up in your facing
++    -- KICK+ (Facing): same, but kicks every pawn lined up in your facing
+     -- direction, not just the first -- each slides independently, farthest
+     -- one first so nobody transiently overlaps mid-resolution.
+     abltMng.register({
+         id = "kick_plus",
+-        name = "Kick+ (Moving)",
+-        trigger = abltMng.TRIGGER.MOVING,
+-        description = "Like Kick, but kicks every pawn lined up in your facing direction, not just the first.",
++        name = "Kick+ (Facing)",
++        trigger = abltMng.TRIGGER.FACING,
++        description = "Like Kick, but kicks every pawn lined up in your facing direction, not just the first. Falls back to a normal step if nothing's there.",
+         execute = function(user, moveVec, ctx)
+             local dCol, dRow = moveVec.dCol, moveVec.dRow
+-            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+             local nc, nr = user.col + dCol, user.row + dRow
+-            local kicked = {}
+             if ctx.getAt(nc, nr) then
+-                kicked = ctx.kickChain(nc, nr, dCol, dRow, true)
++                local kicked = ctx.kickChain(nc, nr, dCol, dRow, true)
++                local ids = {}
++                for _, p in ipairs(kicked) do table.insert(ids, p.id) end
++                return { ok = true, affectedIds = ids }
+             end
+-            local ids = {}
+-            for _, p in ipairs(kicked) do table.insert(ids, p.id) end
+-            return { ok = true, affectedIds = ids }
++            return { ok = ctx.stepIfClear(user, dCol, dRow) }
+         end,
+     })
+ 
+-    -- THROW (Moving): step forward normally, then the pawn now adjacent in
+-    -- your facing direction is thrown -- it jumps over the 1st grid beyond
+-    -- it (ignoring any pawn there, but not a wall) and lands on the 2nd.
+-    -- If it lands on an occupied tile, see chessUpdtr's
++    -- THROW (Facing): press a direction; if a pawn is immediately adjacent
++    -- that way, it's thrown in place -- no move -- jumping over the 1st
++    -- grid beyond it (ignoring any pawn there, but not a wall) and landing
++    -- on the 2nd. If it lands on an occupied tile, see chessUpdtr's
+     -- resolveJumpLanding (Armor/Protected/Spike-Headed/Lightweight
+-    -- interactions).
++    -- interactions). Falls back to a normal step if nothing's adjacent.
+     abltMng.register({
+         id = "throw",
+-        name = "Throw (Moving)",
+-        trigger = abltMng.TRIGGER.MOVING,
+-        description = "Step forward normally; the pawn now adjacent in your facing direction is thrown 2 tiles (jumping over the 1st, landing on the 2nd).",
++        name = "Throw (Facing)",
++        trigger = abltMng.TRIGGER.FACING,
++        description = "Face a direction; a pawn immediately adjacent that way is thrown 2 tiles in place (jumping over the 1st, landing on the 2nd). Falls back to a normal step if nothing's there.",
+         execute = function(user, moveVec, ctx)
+             local dCol, dRow = moveVec.dCol, moveVec.dRow
+-            if not ctx.stepIfClear(user, dCol, dRow) then return { ok = false } end
+             local target = ctx.getAt(user.col + dCol, user.row + dRow)
+-            if not target then return { ok = true } end -- moved, nothing there to throw
+-            local result = ctx.throwPawn(target, dCol, dRow)
+-            if result.ok == false then return { ok = true, reason = result.reason } end -- the move itself still succeeded
+-            return { ok = true, affectedIds = { target.id } }
++            if target then
++                local result = ctx.throwPawn(target, dCol, dRow)
++                if result.ok == false then return { ok = true, reason = result.reason } end
++                return { ok = true, affectedIds = { target.id } }
++            end
++            return { ok = ctx.stepIfClear(user, dCol, dRow) }
+         end,
+     })
+ end
+diff --git a/modules/camera.lua b/modules/camera.lua
+index cdf1104..b84575c 100644
+--- a/modules/camera.lua
++++ b/modules/camera.lua
+@@ -49,6 +49,14 @@ function camera.new(opts)
+     return self
+ end
+ 
++-- Single source of truth for positioning worldGroup: centerX/centerY is
++-- where the viewport's center sits in worldGroup's *parent* space (0,0
++-- when worldGroup lives inside a container that's already positioned at
++-- the viewport's screen center -- see the module docstring). Previously
++-- this was defined twice, and the second (dead-code-shadowing) copy
++-- silently dropped centerX/centerY, so :setZoom() and :focusOn() disagreed
++-- about where the viewport center was -- that mismatch was the source of
++-- the camera "jumping" oddly on zoom.
+ local function applyZoom(self)
+     local targetX = self.centerX - self.focusX * self.zoom
+     local targetY = self.centerY - self.focusY * self.zoom
+@@ -65,12 +73,6 @@ local function clampAxis(desired, worldDim, viewportDim)
+     return desired
+ end
+ 
+-local function applyZoom(self)
+-    local targetX = -self.focusX * self.zoom
+-    local targetY = -self.focusY * self.zoom
+-    self.worldGroup.x, self.worldGroup.y = targetX, targetY
+-end
+-
+ -- Pans (animated by default) so world point (worldX, worldY) ends up at
+ -- the center of the viewport, clamped to the map's bounds.
+ -- opts: { instant = true } to snap immediately (e.g. on level load).
+diff --git a/modules/chessMap.lua b/modules/chessMap.lua
+index 811cf7a..a0898ab 100644
+--- a/modules/chessMap.lua
++++ b/modules/chessMap.lua
+@@ -24,6 +24,9 @@ chessMap.TILE = {
+     JAIL         = "jail",        -- bars: blocks everyone except a Tiny Size pawn
+     WALL_HOLE    = "wall_hole",   -- a wall with a tiny hole under it: same rule as JAIL
+     TUNNEL       = "tunnel",      -- Tiny-only; paired by id (see opts.tunnels), teleports on entry
++    CAGE         = "cage",        -- closed gate: blocks like a wall until its paired button is held
++    CAGE_OPEN    = "cage_open",   -- runtime-only state: same tile, currently open (walkable)
++    CAGE_BUTTON  = "cage_button", -- pressure plate: any pawn standing here opens its paired CAGE(s)
+ }
+ 
+ -- ASCII legend used by level data files (see data/sampleLevel.lua)
+@@ -38,6 +41,8 @@ chessMap.LEGEND_CHARS = {
+     ["J"] = chessMap.TILE.JAIL,
+     ["H"] = chessMap.TILE.WALL_HOLE,
+     ["T"] = chessMap.TILE.TUNNEL,
++    ["C"] = chessMap.TILE.CAGE,
++    ["B"] = chessMap.TILE.CAGE_BUTTON,
+ }
+ 
+ local TILE_COLORS = {
+@@ -52,6 +57,9 @@ local TILE_COLORS = {
+     [chessMap.TILE.JAIL]        = { 0.16, 0.17, 0.20 },
+     [chessMap.TILE.WALL_HOLE]   = { 0.10, 0.10, 0.12 },
+     [chessMap.TILE.TUNNEL]      = { 0.18, 0.12, 0.22 },
++    [chessMap.TILE.CAGE]        = { 0.24, 0.09, 0.09 },
++    [chessMap.TILE.CAGE_OPEN]   = { 0.10, 0.20, 0.11 },
++    [chessMap.TILE.CAGE_BUTTON] = { 0.22, 0.19, 0.07 },
+ }
+ 
+ -- terrain types that get an overlay sprite drawn on top of the floor color
+@@ -63,6 +71,9 @@ local TILE_OVERLAY_IMAGE = {
+     [chessMap.TILE.JAIL]      = "images/jail_bars.png",
+     [chessMap.TILE.WALL_HOLE] = "images/wall_hole.png",
+     [chessMap.TILE.TUNNEL]    = "images/tunnel.png",
++    [chessMap.TILE.CAGE]      = "images/cage_closed.png",
++    [chessMap.TILE.CAGE_OPEN] = "images/cage_open.png",
++    [chessMap.TILE.CAGE_BUTTON] = "images/cage_button.png",
+ }
+ 
+ -- tile types only a Tiny Size pawn can enter -- everyone else is blocked
+@@ -108,6 +119,7 @@ function chessMap.new(levelRows, opts)
+     self.goalTiles = {}
+     self.mechanismTiles = {}
+     self.tunnelsById = {}  -- id -> array of {col,row} (normally exactly 2 -- an entrance and its exit)
++    self.cageGroups = {}   -- id -> { buttons = {{col,row},...}, cages = {{col,row},...} }
+ 
+     for r = 1, self.rows do
+         self.tiles[r] = {}
+@@ -145,6 +157,23 @@ function chessMap.new(levelRows, opts)
+         table.insert(self.tunnelsById[t.id], { col = t.col, row = t.row })
+     end
+ 
++    -- cage pairing: opts.cages = { {id=, kind="button"|"cage", col=, row=}, ... }
++    -- -- tags the already-placed CAGE ('C') / CAGE_BUTTON ('B') tile with
++    -- which group it belongs to. A group can have several buttons and/or
++    -- several cage tiles sharing one id; :tickCageGroup (driven by
++    -- chessUpdtr) opens every cage tile in a group whenever any of its
++    -- button tiles is occupied by a pawn, and closes them again once none are.
++    for _, c in ipairs(opts.cages or {}) do
++        local tile = self.tiles[c.row] and self.tiles[c.row][c.col]
++        local wantType = (c.kind == "button") and chessMap.TILE.CAGE_BUTTON or chessMap.TILE.CAGE
++        assert(tile and tile.type == wantType,
++            "chessMap: opts.cages entry at (" .. c.col .. "," .. c.row .. ") isn't a " ..
++            (c.kind == "button" and "CAGE_BUTTON ('B')" or "CAGE ('C')") .. " tile")
++        self.cageGroups[c.id] = self.cageGroups[c.id] or { buttons = {}, cages = {} }
++        local list = (c.kind == "button") and self.cageGroups[c.id].buttons or self.cageGroups[c.id].cages
++        table.insert(list, { col = c.col, row = c.row })
++    end
++
+     self.tileVisuals = {} -- [row][col] = { bg=rect, overlay=image|nil }
+ 
+     return self
+@@ -182,6 +211,7 @@ function chessMap:isWalkable(col, row, pawn)
+     local tile = self:getTile(col, row)
+     if not tile then return false end
+     if tile.type == chessMap.TILE.WALL or tile.type == chessMap.TILE.VOID then return false end
++    if tile.type == chessMap.TILE.CAGE then return false end -- closed gate: blocks like a wall
+     if TINY_ONLY_TILES[tile.type] then
+         return pawn ~= nil and pawn.traits ~= nil and pawn.traits["tiny_size"] == true
+     end
+@@ -191,10 +221,11 @@ end
+ function chessMap:isBlocking(col, row)
+     -- true if a straight-line effect (like Fire Beam) should stop here.
+     -- JAIL/WALL_HOLE/TUNNEL are all physically slim enough to see through
+-    -- (bars, a hole, a tunnel mouth) -- only a solid WALL blocks sight.
++    -- (bars, a hole, a tunnel mouth) -- only a solid WALL or closed CAGE
++    -- blocks sight.
+     local tile = self:getTile(col, row)
+     if not tile then return true end
+-    return tile.type == chessMap.TILE.WALL
++    return tile.type == chessMap.TILE.WALL or tile.type == chessMap.TILE.CAGE
+ end
+ 
+ -- Returns the OTHER end of a paired tunnel (col,row belongs to), or nil if
+@@ -295,4 +326,21 @@ function chessMap:getGoalTiles()
+     return self.goalTiles
+ end
+ 
++-- Opens or closes every CAGE tile in group `groupId` (a no-op for any tile
++-- already in that state, so it's safe to call every turn regardless of
++-- whether anything actually changed). See chessUpdtr:tickCages, which
++-- decides `isOpen` per group by checking its button tiles for occupants.
++function chessMap:setCageOpen(groupId, isOpen)
++    local group = self.cageGroups[groupId]
++    if not group then return end
++    local wantType = isOpen and chessMap.TILE.CAGE_OPEN or chessMap.TILE.CAGE
++    for _, spot in ipairs(group.cages) do
++        local tile = self.tiles[spot.row][spot.col]
++        if tile.type ~= wantType then
++            tile.type = wantType
++            self:refreshTile(spot.col, spot.row)
++        end
++    end
++end
++
+ return chessMap
+diff --git a/modules/chessUpdtr.lua b/modules/chessUpdtr.lua
+index a14ac13..b4ec83b 100644
+--- a/modules/chessUpdtr.lua
++++ b/modules/chessUpdtr.lua
+@@ -54,45 +54,74 @@ function chessUpdtr:buildCtx()
+         return dplyr:hasTrait(p, "armor") or dplyr:hasTrait(p, "protected")
+     end
+ 
++    -- constant px/sec pacing for slides -- see kickSlide and resolveJumpLanding
++    local MOVE_MS_PER_TILE = 90
++
++    -- forward-declared: resolveJumpArrival (below) calls this recursively
++    -- for a lightweight pawn's bounce-onward hop
++    local resolveJumpLanding
++
+     -- The jump-landing resolution table (see Throw, below). jmpPawn has
+-    -- just tried to land on (landCol,landRow) while traveling (dCol,dRow);
+-    -- bedPawn is whoever's already standing there, if anyone:
++    -- just VISUALLY ARRIVED at (landCol,landRow) after hopping there while
++    -- traveling (dCol,dRow); bedPawn is whoever was already standing
++    -- there when the hop started, if anyone. This only runs once the hop's
++    -- animation finishes (see the timer.performWithDelay call below it's
++    -- scheduled from) -- resolving it earlier (like this used to) meant
++    -- bedPawn could die before the jumper had visibly gone anywhere,
++    -- which read as pawns just vanishing with no way to tell what happened:
+     --   a. jmpPawn Armored/Protected             -> bedPawn dies, jmpPawn lands
+     --   b. bedPawn Spike-Headed (jmpPawn isn't a) -> jmpPawn dies
+     --   c. neither of the above, jmpPawn isn't
+     --      Lightweight either                    -> both die
+     --   d. jmpPawn Lightweight (neither a nor b)  -> taps bedPawn, keeps
+     --      jumping to the next grid onward (recurses); dies if that's a wall
+-    local function resolveJumpLanding(jmpPawn, landCol, landRow, dCol, dRow)
+-        local bedPawn = dplyr:getAt(landCol, landRow)
+-        if not bedPawn then
+-            dplyr:moveTo(jmpPawn.id, landCol, landRow)
++    local function resolveJumpArrival(jmpPawn, bedPawn, landCol, landRow, dCol, dRow)
++        -- defensive: bail if either side is already gone by the time this
++        -- fires (shouldn't normally happen in a turn-based game, but avoid
++        -- acting on stale references if it ever does)
++        if not dplyr:getById(jmpPawn.id) or not dplyr:getById(bedPawn.id) then
++            self:checkClearCondition()
++            self:notifyChanged()
+             return
+         end
+ 
+         if isArmored(jmpPawn) then
+             killPawn(bedPawn.id)
+-            dplyr:moveTo(jmpPawn.id, landCol, landRow)
+-            return
+-        end
+-
+-        if dplyr:hasTrait(bedPawn, "spike_headed") then
++        elseif dplyr:hasTrait(bedPawn, "spike_headed") then
+             killPawn(jmpPawn.id)
+-            return
+-        end
+-
+-        if dplyr:hasTrait(jmpPawn, "lightweight") then
++        elseif dplyr:hasTrait(jmpPawn, "lightweight") then
+             local nextCol, nextRow = landCol + dCol, landRow + dRow
+             if not map:isWalkable(nextCol, nextRow, jmpPawn) then
+                 killPawn(jmpPawn.id) -- hit a wall while bouncing onward
+-                return
++            else
++                resolveJumpLanding(jmpPawn, nextCol, nextRow, dCol, dRow, 1)
+             end
+-            resolveJumpLanding(jmpPawn, nextCol, nextRow, dCol, dRow)
+-            return
++        else
++            killPawn(bedPawn.id)
++            killPawn(jmpPawn.id)
+         end
+ 
+-        killPawn(bedPawn.id)
+-        killPawn(jmpPawn.id)
++        self:checkClearCondition()
++        self:notifyChanged()
++    end
++
++    -- hopTiles: how many tiles THIS leg of the hop covers (2 for the
++    -- initial throw, 1 for each further lightweight bounce) -- sets the
++    -- animation duration so every leg moves at the same constant speed
++    -- (see MOVE_MS_PER_TILE) regardless of how far it travels.
++    resolveJumpLanding = function(jmpPawn, landCol, landRow, dCol, dRow, hopTiles)
++        local duration = (hopTiles or 2) * MOVE_MS_PER_TILE
++        -- captured now, before jmpPawn's own moveTo (below) claims this
++        -- tile's occupancy slot -- see pawnDplyr:_clearOccupancyIfOwner
++        local bedPawn = dplyr:getAt(landCol, landRow)
++
++        dplyr:moveTo(jmpPawn.id, landCol, landRow, { jump = true, duration = duration })
++
++        if not bedPawn then return end -- clean landing, nothing to resolve
++
++        timer.performWithDelay(duration, function()
++            resolveJumpArrival(jmpPawn, bedPawn, landCol, landRow, dCol, dRow)
++        end)
+     end
+ 
+     local function kickSlide(pawn, dCol, dRow)
+@@ -104,7 +133,9 @@ function chessUpdtr:buildCtx()
+             c, r = nc, nr
+         end
+         if c ~= pawn.col or r ~= pawn.row then
+-            dplyr:moveTo(pawn.id, c, r) -- no setFacing -- a kicked pawn's own facing never changes
++            local distance = math.max(math.abs(c - pawn.col), math.abs(r - pawn.row))
++            -- no setFacing -- a kicked pawn's own facing never changes
++            dplyr:moveTo(pawn.id, c, r, { duration = distance * MOVE_MS_PER_TILE })
+         end
+     end
+ 
+@@ -385,11 +416,12 @@ local function isUnitCardinal(dCol, dRow)
+ end
+ 
+ -- Moves a pawn exactly one tile in direction (dCol, dRow), e.g. (0,-1) for
+--- "up" -- UNLESS the pawn has a MOVING-trigger ability assigned
++-- "up" -- UNLESS the pawn has a MOVING- or FACING-trigger ability assigned
+ -- (pawn.movingAbility), in which case that ability decides what a
+--- directional input does instead (see modules/abltMng.lua's Push/Swap/Pull
+--- family). Facing always updates to the input direction first, regardless
+--- of which path handles the actual movement, since Swap depends on it.
++-- directional input does instead (see modules/abltMng.lua's Push/Swap/Pull/
++-- Kick/Throw family). Facing always updates to the input direction first,
++-- regardless of which path handles the actual movement, since Swap/Kick/
++-- Throw all depend on it.
+ function chessUpdtr:requestStep(pawn, dCol, dRow)
+     local expectedFaction = (self.turn == chessUpdtr.TURN.PC) and "pc" or "enemy"
+     if pawn.faction ~= expectedFaction then
+@@ -402,7 +434,7 @@ function chessUpdtr:requestStep(pawn, dCol, dRow)
+     self.dplyr:setFacing(pawn.id, dCol, dRow)
+ 
+     local movingDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
+-    if movingDef and movingDef.trigger == abltMng.TRIGGER.MOVING then
++    if movingDef and (movingDef.trigger == abltMng.TRIGGER.MOVING or movingDef.trigger == abltMng.TRIGGER.FACING) then
+         local result = movingDef.execute(pawn, { dCol = dCol, dRow = dRow }, self.ctx) or {}
+         local ok = (result.ok ~= false)
+         if ok then
+@@ -541,7 +573,26 @@ function chessUpdtr:tickHazards()
+ end
+ 
+ -- --------------------------------------------------------------- OUTCOME
++-- Opens/closes every cage group based on whether any of its button tiles
++-- currently has a pawn on it (either faction -- "any pawn stands on the
++-- button" per the mechanic, not just PCs). Cheap and idempotent, so it's
++-- safe to just call this on every action rather than tracking deltas.
++function chessUpdtr:tickCages()
++    for groupId, group in pairs(self.map.cageGroups) do
++        local isOpen = false
++        for _, spot in ipairs(group.buttons) do
++            if self.dplyr:getAt(spot.col, spot.row) then
++                isOpen = true
++                break
++            end
++        end
++        self.map:setCageOpen(groupId, isOpen)
++    end
++end
++
+ function chessUpdtr:checkClearCondition()
++    self:tickCages()
++
+     local goals = self.map:getGoalTiles()
+     if #goals == 0 then return end
+ 
+diff --git a/modules/pawnDplyr.lua b/modules/pawnDplyr.lua
+index fb08729..1be6bd2 100644
+--- a/modules/pawnDplyr.lua
++++ b/modules/pawnDplyr.lua
+@@ -258,6 +258,19 @@ function pawnDplyr:_buildVisuals(pawn, info)
+     pawn.container = container
+     pawn._kindInfo = info -- re-looked-up by :_applySprite whenever facing changes
+ 
++    -- Drop shadow: hidden at ground level (alpha 0) until moveTo's jump
++    -- effect fades it in, so a pawn mid-Throw (or a lightweight pawn
++    -- bouncing onward) is visibly airborne. Inserted before the sprite so
++    -- it always renders behind it -- see :_applySprite, which re-asserts
++    -- this ordering whenever facing swaps the sprite out.
++    -- Solar2D has no display.newEllipse -- the standard trick is a circle
++    -- squashed with yScale.
++    local shadow = display.newCircle(container, 0, size * 0.32, size * 0.30)
++    shadow.yScale = 0.12 / 0.30
++    shadow:setFillColor(0, 0, 0, 0.4)
++    shadow.alpha = 0
++    pawn.shadow = shadow
++
+     local sprite = display.newImageRect(container, self:_spritePathFor(info, pawn), size * 0.86, size * 0.86)
+     sprite.x, sprite.y = 0, 0
+     pawn.sprite = sprite
+@@ -266,7 +279,7 @@ function pawnDplyr:_buildVisuals(pawn, info)
+     if pawn.hp then
+         local hpText = display.newText({
+             parent = container, text = tostring(pawn.hp),
+-            x = size * 0.20, y = -size * 0.20, font = native.systemFontBold, fontSize = math.max(8, math.floor(size * 0.5)),
++            x = size * 0.20, y = -size * 0.20, font = native.systemFontBold, fontSize = math.max(8, math.floor(size * 0.25)),
+         })
+         hpText:setFillColor(1, 1, 1)
+         pawn.hpText = hpText
+@@ -437,6 +450,7 @@ function pawnDplyr:_applySprite(pawn)
+     sprite.x, sprite.y = 0, 0
+     pawn.container:insert(1, sprite) -- keep it behind the HP label
+     pawn.sprite = sprite
++    if pawn.shadow then pawn.container:insert(1, pawn.shadow) end -- re-assert shadow-behind-sprite order
+ end
+ 
+ -- Sets which way a pawn is looking (used by facing-dependent abilities
+@@ -453,7 +467,7 @@ end
+ function pawnDplyr:remove(pawnId)
+     local pawn = self.pawns[pawnId]
+     if not pawn then return end
+-    self.occupancy[occKey(pawn.col, pawn.row)] = nil
++    self:_clearOccupancyIfOwner(pawnId, pawn.col, pawn.row)
+     if pawn.container then pawn.container:removeSelf() end -- takes sprite/hpText/ring with it
+     self.pawns[pawnId] = nil
+ end
+@@ -480,7 +494,18 @@ function pawnDplyr:isOccupied(col, row)
+     return self.occupancy[occKey(col, row)] ~= nil
+ end
+ 
+--- ------------------------------------------------------------------- MOVE
++-- Clears the occupancy slot at (col,row) only if `pawnId` still owns it.
++-- Guards against a pawn's own old-tile cleanup wiping out a DIFFERENT
++-- pawn's occupancy record if that tile got claimed out from under it in
++-- the meantime -- e.g. a Throw's target tile, where the jumper's moveTo
++-- claims (landCol,landRow) immediately but the bed pawn's own col/row
++-- still say it's there too, until its (possibly delayed) removal runs.
++function pawnDplyr:_clearOccupancyIfOwner(pawnId, col, row)
++    if self.occupancy[occKey(col, row)] == pawnId then
++        self.occupancy[occKey(col, row)] = nil
++    end
++end
++
+ -- Moves a pawn to a new grid cell and animates its sprite. Does NOT
+ -- validate walkability/occupancy -- chessUpdtr is responsible for the
+ -- rules; this module just carries out the relocation.
+@@ -489,7 +514,7 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
+     local pawn = self.pawns[pawnId]
+     if not pawn then return end
+ 
+-    self.occupancy[occKey(pawn.col, pawn.row)] = nil
++    self:_clearOccupancyIfOwner(pawnId, pawn.col, pawn.row)
+     pawn.col, pawn.row = col, row
+     self.occupancy[occKey(col, row)] = pawnId
+ 
+@@ -503,7 +528,7 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
+     if tile and tile.type == chessMap.TILE.TUNNEL then
+         local exitCol, exitRow = self.map:getTunnelExit(col, row)
+         if exitCol and not self:isOccupied(exitCol, exitRow) then
+-            self.occupancy[occKey(col, row)] = nil
++            self:_clearOccupancyIfOwner(pawnId, col, row)
+             pawn.col, pawn.row = exitCol, exitRow
+             self.occupancy[occKey(exitCol, exitRow)] = pawnId
+             col, row = exitCol, exitRow
+@@ -512,8 +537,39 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
+ 
+     local x, y = self.map:gridToWorld(col, row)
+     local duration = opts.duration or 160
++    transition.cancel(pawn.container)
+     transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })
+ 
++    -- Jump/air-state readability: Throw's own hop and a lightweight
++    -- pawn's bounce-onward landing both pass opts.jump=true. The sprite
++    -- visibly lifts and scales up, with a drop shadow fading in beneath
++    -- it, then both settle back to normal on landing -- so a pawn mid-air
++    -- reads differently from a normal step, push, pull, swap, or kick
++    -- slide (none of which set opts.jump).
++    if opts.jump and pawn.sprite and pawn.shadow then
++        local size = self.map.tileSize
++        local liftY = -size * 0.35
++        local upTime = duration * 0.5
++        local downTime = duration - upTime
++        local sprite, shadow = pawn.sprite, pawn.shadow
++        transition.cancel(sprite)
++        transition.cancel(shadow)
++        sprite.y, sprite.xScale, sprite.yScale = 0, 1, 1
++        shadow.alpha = 0
++        transition.to(sprite, {
++            y = liftY, xScale = 1.18, yScale = 1.18, time = upTime, transition = easing.outQuad,
++            onComplete = function()
++                transition.to(sprite, { y = 0, xScale = 1, yScale = 1, time = downTime, transition = easing.inQuad })
++            end,
++        })
++        transition.to(shadow, {
++            alpha = 1, time = upTime, transition = easing.outQuad,
++            onComplete = function()
++                transition.to(shadow, { alpha = 0, time = downTime, transition = easing.inQuad })
++            end,
++        })
++    end
++
+     Runtime:dispatchEvent({ name = "pawnMoved", pawnId = pawnId, col = col, row = row })
+ end
+ 
+diff --git a/tests/corona_stub.lua b/tests/corona_stub.lua
+index b2fd45a..b39bb55 100644
+--- a/tests/corona_stub.lua
++++ b/tests/corona_stub.lua
+@@ -58,6 +58,10 @@ function display.newPolygon(parentOrX, xOrY, yOrVertices, vertices)
+     return fakeDisplayObject({})
+ end
+ 
++function display.newCircle(parentOrX, xOrY, yOrRadius, radius)
++    return fakeDisplayObject({})
++end
++
+ function display.newText(params)
+     local obj = fakeDisplayObject({ text = params and params.text or "" })
+     return obj
+@@ -75,8 +79,18 @@ function transition.to(obj, params)
+     end
+     if params.onComplete then params.onComplete(obj) end
+ end
++function transition.cancel(obj) end
+ 
+-easing = { outQuad = "outQuad" }
++easing = { outQuad = "outQuad", inQuad = "inQuad" }
++
++-- timer.performWithDelay applies immediately (no real async needed for
++-- headless tests) -- mirrors transition.to's "apply immediately" stance.
++timer = {}
++function timer.performWithDelay(delay, fn, iterations)
++    if fn then fn() end
++    return { cancelled = false }
++end
++function timer.cancel(handle) end
+ 
+ local listeners = {}
+ Runtime = {}
+diff --git a/tests/smoke_test.lua b/tests/smoke_test.lua
+index 6028edf..546781b 100644
+--- a/tests/smoke_test.lua
++++ b/tests/smoke_test.lua
+@@ -14,11 +14,11 @@ abltMng.registerDefaults()
+ traitMng.registerDefaults()
+ 
+ line("BUILD MAP")
+-local map = chessMap.new(sampleLevel.rows, { tileSize = 48, tunnels = sampleLevel.tunnels })
++local map = chessMap.new(sampleLevel.rows, { tileSize = 48, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
+ print(string.format("cols=%d rows=%d tileSize=%d spawnPCs=%d spawnEnemies=%d goals=%d",
+     map.cols, map.rows, map.tileSize, #map.spawnPCs, #map.spawnEnemies, #map:getGoalTiles()))
+ assert(map.cols == 32 and map.rows == 15, "map dimensions wrong")
+-assert(#map.spawnPCs == 6 and #map.spawnEnemies == 5, "spawn counts wrong")
++assert(#map.spawnPCs == 8 and #map.spawnEnemies == 5, "spawn counts wrong")
+ 
+ local fakeGroup = display.newGroup()
+ map:draw(fakeGroup)
+@@ -50,6 +50,13 @@ local treant, spitter = enemies[4], enemies[5]
+ line("MOVEMENT")
+ con:select(knight.id)
+ assert(con.selectedId == knight.id, "select failed")
++-- Knight's movingAbility is "push" (MOVING trigger), so requestMove/
++-- requestStep don't do a plain move -- a push-fallback step happens when
++-- the target tile's empty, but a pawn there gets shoved. Testing baseline
++-- movement semantics from Knight's native spawn (4,2) would silently push
++-- Mage (at the adjacent spawn (5,2)) out of position. Park Knight on open
++-- scratch floor first so these moves land on empty tiles as intended.
++dplyr:moveTo(knight.id, 13, 8)
+ local startCol, startRow = knight.col, knight.row
+ local ok, reason = updtr:requestMove(knight, startCol + 1, startRow)
+ assert(ok, "knight should be able to move 1 tile onto open floor: " .. tostring(reason))
+@@ -123,11 +130,12 @@ print("guard OK: push absorbed, status consumed")
+ -- ------------------------------------------------------------- DRAG
+ line("DRAG ABILITY")
+ -- line mage up with guardian for a pull test, 2 tiles apart on same row
+-dplyr:moveTo(mage.id, 4, 4)
+-dplyr:moveTo(guardian.id, 6, 4)
++-- (cols 14/16 -- clear of any spawn tile or extra furniture on row 4)
++dplyr:moveTo(mage.id, 14, 4)
++dplyr:moveTo(guardian.id, 16, 4)
+ local dragOk = updtr:useAbility(mage, "drag", guardian)
+ assert(dragOk, "drag should succeed on a pawn in a clear line within range")
+-assert(guardian.col == 5 and guardian.row == 4, "guardian should be pulled one tile toward mage, got (" .. guardian.col .. "," .. guardian.row .. ")")
++assert(guardian.col == 15 and guardian.row == 4, "guardian should be pulled one tile toward mage, got (" .. guardian.col .. "," .. guardian.row .. ")")
+ print("drag OK: guardian pulled to", guardian.col, guardian.row)
+ 
+ -- ------------------------------------------------------------- FIRE BEAM
+@@ -169,11 +177,41 @@ print("hazard sink OK after", ticks, "ticks -- tile is now VOID, occupant remove
+ line("CLEAR CONDITION")
+ local capturedClear = false
+ Runtime:addEventListener("levelCleared", function() capturedClear = true end)
+-local goal = map:getGoalTiles()[1]
+-dplyr:moveTo(knight.id, goal.col, goal.row)
++local goals = map:getGoalTiles()
++assert(#goals == 3, "expected 3 goal tiles, got " .. #goals)
++dplyr:moveTo(knight.id, goals[1].col, goals[1].row)
+ updtr:checkClearCondition()
+-assert(capturedClear, "levelCleared event should have fired once the (only) goal tile is PC-occupied")
+-print("clear condition OK: levelCleared fired")
++assert(not capturedClear, "levelCleared should NOT fire with only 1 of 3 goals held")
++dplyr:moveTo(mage.id, goals[2].col, goals[2].row)
++updtr:checkClearCondition()
++assert(not capturedClear, "levelCleared should NOT fire with only 2 of 3 goals held")
++dplyr:moveTo(guardian.id, goals[3].col, goals[3].row)
++updtr:checkClearCondition()
++assert(capturedClear, "levelCleared event should have fired once all 3 goal tiles are PC-occupied")
++print("clear condition OK: levelCleared fired once all 3 goals were held")
++
++-- ------------------------------------------------------------ CAGE GATES
++line("CAGE MECHANISM -- BUTTON OPENS ITS PAIRED CAGE, CLOSES WHEN VACATED")
++assert(map:getTile(17, 13).type == "cage", "cage_a should start closed")
++assert(not map:isWalkable(17, 13), "a closed cage should block movement")
++dplyr:moveTo(knight.id, 16, 13) -- onto cage_a's button
++updtr:checkClearCondition() -- cages are ticked as part of this -- see chessUpdtr:tickCages
++assert(map:getTile(17, 13).type == "cage_open", "cage_a should open once a pawn stands on its button")
++assert(map:isWalkable(17, 13), "an open cage should be walkable")
++dplyr:moveTo(knight.id, 10, 13) -- step off the button
++updtr:checkClearCondition()
++assert(map:getTile(17, 13).type == "cage", "cage_a should close again once its button is vacated")
++assert(not map:isWalkable(17, 13), "a closed cage should block movement again")
++
++assert(map:getTile(25, 14).type == "cage", "cage_b should start closed")
++dplyr:moveTo(mage.id, 24, 14) -- onto cage_b's button
++updtr:checkClearCondition()
++assert(map:getTile(25, 14).type == "cage_open", "cage_b should open independently of cage_a")
++assert(map:getTile(17, 13).type == "cage", "cage_a should still be closed -- the two sets are independent")
++dplyr:moveTo(mage.id, 22, 14) -- step off the button
++updtr:checkClearCondition()
++assert(map:getTile(25, 14).type == "cage", "cage_b should close again once its button is vacated")
++print("cage OK: both gates open on their own button and close independently when vacated")
+ 
+ -- ------------------------------------------------------------- TURN CYCLE
+ line("TURN CYCLE / ENEMY AI PHASE")
+@@ -313,9 +351,15 @@ print("lightweight OK: mage carried an extra tile to", mage.col, mage.row)
+ -- ----------------------------------------------------------- STEALTH TRAIT
+ line("STEALTH TRAIT -- GRANTED/REVOKED AT RUNTIME, SKIPS ENEMY AUTO-TARGETING")
+ assert(not dplyr:hasTrait(knight, "stealth"), "knight should not have stealth natively")
+-dplyr:moveTo(turret.id, 3, 4)
++-- row 4 has Slinger's spawn at col 3 and Scout's at col 6 -- both still
++-- unmoved this early in the file. Start turret at col 2 (west of Slinger)
++-- and relocate Scout out of the test lane first so it survives (removing
++-- it outright would break the tunnel tests that need it later).
++dplyr:moveTo(scout.id, 17, 4)
++dplyr:moveTo(slinger.id, 18, 4)
++dplyr:moveTo(turret.id, 2, 4)
+ dplyr:moveTo(knight.id, 10, 4)
+-for c = 4, 9 do
++for c = 3, 9 do
+     local occ = dplyr:getAt(c, 4)
+     if occ and occ.id ~= turret.id and occ.id ~= knight.id then dplyr:remove(occ.id) end
+ end
+@@ -484,32 +528,38 @@ print("generalized AI OK: knight hp", knightHp8, "->", knight.hp, "-- mage hp",
+ dplyr:moveTo(treant.id, 30, 11) -- park back near its spawn -- the Throw tests below reuse row 8
+ dplyr:moveTo(knight.id, 3, 12)
+ 
+--- --------------------------------------------------------- KICK (MOVING)
+-line("KICK (MOVING) -- SLIDES UNTIL BLOCKED, FACING NEVER CHANGES")
+-dplyr:moveTo(brawler.id, 3, 2)
++-- --------------------------------------------------------- KICK (FACING)
++line("KICK (FACING) -- TRIGGERS ON AN ADJACENT PAWN WITHOUT MOVING, SLIDES UNTIL BLOCKED")
++dplyr:moveTo(brawler.id, 4, 2)
+ local kickTarget = dplyr:deploy("stone_a", 5, 2)
+ local kickBlocker = dplyr:deploy("stone_b", 10, 2)
+ local kickFacingBefore = { kickTarget.facing[1], kickTarget.facing[2] }
+ local kickOk = updtr:requestStep(brawler, 1, 0)
+-assert(kickOk, "kick should succeed: brawler steps forward normally")
+-assert(brawler.col == 4 and brawler.row == 2, "brawler should have moved one tile east")
++assert(kickOk, "kick should succeed: adjacent pawn triggers the kick")
++assert(brawler.col == 4 and brawler.row == 2, "brawler should NOT move -- facing-trigger fires in place")
+ assert(kickTarget.col == 9 and kickTarget.row == 2, "kicked stone should slide until just before the blocker, got " .. kickTarget.col)
+ assert(kickTarget.facing[1] == kickFacingBefore[1] and kickTarget.facing[2] == kickFacingBefore[2],
+     "a kicked pawn's own facing should never change")
+-print("kick OK: brawler at", brawler.col, brawler.row, "-- kicked stone slid to", kickTarget.col)
++print("kick OK: brawler stayed at", brawler.col, brawler.row, "-- kicked stone slid to", kickTarget.col)
+ dplyr:remove(kickTarget.id); dplyr:remove(kickBlocker.id)
+ 
+--- -------------------------------------------------------- KICK+ (MOVING)
+-line("KICK+ (MOVING) -- KICKS EVERY LINED-UP PAWN, FARTHEST FIRST")
++line("KICK (FACING) -- FALLS BACK TO A NORMAL STEP WHEN NOTHING'S ADJACENT")
++local kickStepOk = updtr:requestStep(brawler, 1, 0)
++assert(kickStepOk, "kick should fall back to a normal step")
++assert(brawler.col == 5 and brawler.row == 2, "brawler should have moved one tile east")
++print("kick fallback OK: brawler moved to", brawler.col, brawler.row)
++
++-- -------------------------------------------------------- KICK+ (FACING)
++line("KICK+ (FACING) -- KICKS EVERY LINED-UP PAWN, FARTHEST FIRST")
+ brawler.movingAbility = "kick_plus"
+-dplyr:moveTo(brawler.id, 3, 2)
++dplyr:moveTo(brawler.id, 4, 2)
+ local k1 = dplyr:deploy("stone_a", 5, 2)
+ local k2 = dplyr:deploy("stone_b", 6, 2)
+ local k3 = dplyr:deploy("stone_c", 7, 2)
+ local kickBlocker2 = dplyr:deploy("stone_a", 12, 2)
+ local kickPlusOk = updtr:requestStep(brawler, 1, 0)
+ assert(kickPlusOk, "kick_plus should succeed")
+-assert(brawler.col == 4, "brawler should have moved one tile east")
++assert(brawler.col == 4, "brawler should NOT move -- facing-trigger fires in place")
+ assert(k3.col == 11, "farthest pawn (kicked first, most room) should end up farthest, got " .. k3.col)
+ assert(k2.col == 10, "middle pawn should end up just behind it, got " .. k2.col)
+ assert(k1.col == 9, "nearest pawn should end up just behind that, got " .. k1.col)
+@@ -517,41 +567,48 @@ print("kick_plus OK: chain resolved to", k1.col, k2.col, k3.col)
+ dplyr:remove(k1.id); dplyr:remove(k2.id); dplyr:remove(k3.id); dplyr:remove(kickBlocker2.id)
+ brawler.movingAbility = "kick" -- restore
+ 
+--- ---------------------------------------------------------- THROW (MOVING)
+-line("THROW (MOVING) -- LANDS 2 TILES AWAY ON AN EMPTY TILE")
+-dplyr:moveTo(slinger.id, 3, 4)
++-- ---------------------------------------------------------- THROW (FACING)
++line("THROW (FACING) -- TRIGGERS ON AN ADJACENT PAWN WITHOUT MOVING, LANDS 2 TILES AWAY")
++dplyr:moveTo(slinger.id, 4, 4)
+ local throwTarget = dplyr:deploy("stone_a", 5, 4)
+ local throwOk = updtr:requestStep(slinger, 1, 0)
+-assert(throwOk, "throw should succeed: slinger steps forward normally")
+-assert(slinger.col == 4 and slinger.row == 4, "slinger should have moved one tile east")
++assert(throwOk, "throw should succeed: adjacent pawn triggers the throw")
++assert(slinger.col == 4 and slinger.row == 4, "slinger should NOT move -- facing-trigger fires in place")
+ assert(throwTarget.col == 7 and throwTarget.row == 4, "thrown stone should land 2 tiles from its start, got " .. throwTarget.col)
+-print("throw OK: slinger at", slinger.col, slinger.row, "-- thrown stone landed at", throwTarget.col)
++print("throw OK: slinger stayed at", slinger.col, slinger.row, "-- thrown stone landed at", throwTarget.col)
+ dplyr:remove(throwTarget.id)
+ 
++line("THROW (FACING) -- FALLS BACK TO A NORMAL STEP WHEN NOTHING'S ADJACENT")
++local throwStepOk = updtr:requestStep(slinger, 1, 0)
++assert(throwStepOk, "throw should fall back to a normal step")
++assert(slinger.col == 5 and slinger.row == 4, "slinger should have moved one tile east")
++print("throw fallback OK: slinger moved to", slinger.col, slinger.row)
++
+ line("THROW -- JUMPS CLEAN OVER A PAWN ON THE 1ST GRID (IGNORED, NOT A WALL)")
+-dplyr:moveTo(slinger.id, 2, 8)
++dplyr:moveTo(slinger.id, 3, 8)
+ local throwTarget2 = dplyr:deploy("stone_a", 4, 8)
+ local overPawn = dplyr:deploy("stone_b", 5, 8)
+ local throwOk2 = updtr:requestStep(slinger, 1, 0)
+ assert(throwOk2, "throw should succeed")
++assert(slinger.col == 3 and slinger.row == 8, "slinger should NOT move -- facing-trigger fires in place")
+ assert(throwTarget2.col == 6 and throwTarget2.row == 8, "thrown stone should land on the 2nd grid, jumping clean over the 1st, got " .. throwTarget2.col)
+ assert(overPawn.col == 5, "the pawn jumped over should not have moved")
+ print("throw OK: jumped clean over a pawn, landed at", throwTarget2.col)
+ dplyr:remove(throwTarget2.id); dplyr:remove(overPawn.id)
+ 
+-line("THROW -- BLOCKED BY A WALL (THE STEP STILL SUCCEEDS, THE THROW DOESN'T)")
+-dplyr:moveTo(slinger.id, 9, 6) -- row 6 has a wall at col 12
++line("THROW -- BLOCKED BY A WALL (FACING-TRIGGER STILL FIRES, THE THROW ITSELF FAILS)")
++dplyr:moveTo(slinger.id, 10, 6) -- row 6 has a wall at col 12
+ local throwTarget3 = dplyr:deploy("stone_a", 11, 6)
+ local throwWallOk = updtr:requestStep(slinger, 1, 0)
+-assert(throwWallOk, "the move itself should still succeed even though the throw is wall-blocked")
+-assert(slinger.col == 10 and slinger.row == 6, "slinger should have moved one tile east")
++assert(throwWallOk, "requestStep should still report ok -- the facing-trigger fired, even though the throw itself was wall-blocked")
++assert(slinger.col == 10 and slinger.row == 6, "slinger should NOT move -- facing-trigger fires in place")
+ assert(throwTarget3.col == 11 and throwTarget3.row == 6, "the stone should NOT have been thrown -- a wall blocks the jump")
+ print("throw OK: wall correctly blocked the jump, stone stayed at", throwTarget3.col)
+ dplyr:remove(throwTarget3.id)
+ 
+ -- ------------------------------------------- JUMP-LANDING RESOLUTION TABLE
+ line("JUMP LANDING -- CASE A: ARMORED JUMPER CRUSHES THE BED PAWN")
+-dplyr:moveTo(slinger.id, 2, 8)
++dplyr:moveTo(slinger.id, 3, 8)
+ local jmpA = dplyr:deploy("stone_a", 4, 8)
+ dplyr:addTrait(jmpA.id, "armor")
+ local bedA = dplyr:deploy("stone_b", 6, 8)
+@@ -563,7 +620,7 @@ print("jump-landing OK (case a): armored jumper crushed the bed pawn, landed at"
+ dplyr:remove(jmpA.id)
+ 
+ line("JUMP LANDING -- CASE B: SPIKE-HEADED BED PAWN IMPALES THE JUMPER")
+-dplyr:moveTo(slinger.id, 2, 8)
++dplyr:moveTo(slinger.id, 3, 8)
+ local jmpB = dplyr:deploy("stone_a", 4, 8)
+ local bedB = dplyr:deploy("stone_b", 6, 8)
+ dplyr:addTrait(bedB.id, "spike_headed")
+@@ -575,7 +632,7 @@ print("jump-landing OK (case b): jumper impaled itself on the spike-headed bed p
+ dplyr:remove(bedB.id)
+ 
+ line("JUMP LANDING -- CASE C: NEITHER SIDE PROTECTED -- BOTH DIE")
+-dplyr:moveTo(slinger.id, 2, 8)
++dplyr:moveTo(slinger.id, 3, 8)
+ local jmpC = dplyr:deploy("stone_a", 4, 8)
+ local bedC = dplyr:deploy("stone_b", 6, 8)
+ assert(updtr:requestStep(slinger, 1, 0), "throw should succeed")
+@@ -584,7 +641,7 @@ assert(dplyr:getById(bedC.id) == nil, "bed pawn should have died too (case c: mu
+ print("jump-landing OK (case c): both jumper and bed pawn died")
+ 
+ line("JUMP LANDING -- CASE D: LIGHTWEIGHT JUMPER TAPS AND BOUNCES ONWARD")
+-dplyr:moveTo(slinger.id, 2, 8)
++dplyr:moveTo(slinger.id, 3, 8)
+ local jmpD = dplyr:deploy("stone_a", 4, 8)
+ dplyr:addTrait(jmpD.id, "lightweight")
+ local bedD = dplyr:deploy("stone_b", 6, 8)
+@@ -597,7 +654,7 @@ print("jump-landing OK (case d): lightweight jumper tapped the bed pawn, bounced
+ dplyr:remove(jmpD.id); dplyr:remove(bedD.id)
+ 
+ line("JUMP LANDING -- CASE D CHAINS THROUGH MULTIPLE BED PAWNS")
+-dplyr:moveTo(slinger.id, 2, 8)
++dplyr:moveTo(slinger.id, 3, 8)
+ local jmpD2 = dplyr:deploy("stone_a", 4, 8)
+ dplyr:addTrait(jmpD2.id, "lightweight")
+ local bedD2a = dplyr:deploy("stone_b", 6, 8)
+@@ -611,11 +668,11 @@ print("jump-landing OK: chained through 2 bed pawns, landed at", jmpD2After.col)
+ dplyr:remove(jmpD2.id); dplyr:remove(bedD2a.id); dplyr:remove(bedD2b.id)
+ 
+ line("JUMP LANDING -- CASE D DIES IF IT BOUNCES INTO A WALL")
+-dplyr:moveTo(slinger.id, 7, 6) -- row 6 has a wall at col 12
++dplyr:moveTo(slinger.id, 8, 6) -- row 6 has a wall at col 12
+ local jmpD3 = dplyr:deploy("stone_a", 9, 6)
+ dplyr:addTrait(jmpD3.id, "lightweight")
+ local bedD3 = dplyr:deploy("stone_b", 11, 6)
+-assert(updtr:requestStep(slinger, 1, 0), "the throw ability's own move should still succeed")
++assert(updtr:requestStep(slinger, 1, 0), "the throw ability's own facing-trigger should still report ok")
+ assert(dplyr:getById(jmpD3.id) == nil, "lightweight jumper should die bouncing into a wall")
+ assert(dplyr:getById(bedD3.id), "the tapped bed pawn should survive")
+ print("jump-landing OK: lightweight jumper died bouncing into a wall; tapped bed pawn survived")

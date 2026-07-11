@@ -27,34 +27,43 @@ traitMng.registerDefaults()
 
 -- ------------------------------------------------------------------ TITLE
 local titleText = display.newText({
-    text = "SKB PAWNS", x = display.contentCenterX, y = 18,
+    text = "SKB PAWNS", x = display.screenOriginX + display.actualContentWidth / 2, y = 18,
     font = native.systemFontBold, fontSize = 20,
 })
 titleText:setFillColor(0.85, 0.85, 0.95)
 
 -- -------------------------------------------------------------- BOARD/MAP
--- Tile size is computed so the entire map fits inside the board area.
--- No camera panning needed -- the map sits centered in the board.
-local BOARD_X, BOARD_Y = 8, 40
+-- The board viewport spans the device's *actual* content area (not the
+-- fixed 480x320 letterboxed content rect), so the map fills the real
+-- screen instead of sitting in a small centered box. Tile size is fixed
+-- rather than shrunk to force-fit the whole map -- that's what made the
+-- board look tiny -- so the camera actually pans/zooms as designed.
+local SCREEN_X, SCREEN_Y = display.screenOriginX, display.screenOriginY
+local SCREEN_W, SCREEN_H = display.actualContentWidth, display.actualContentHeight
+
+local BOARD_X, BOARD_Y = SCREEN_X + 8, SCREEN_Y + 40
 local SIDEBAR_W = 150
-local SIDEBAR_X = display.contentWidth - SIDEBAR_W
+local SIDEBAR_X = (SCREEN_X + SCREEN_W) - SIDEBAR_W
 local BOARD_W = SIDEBAR_X - BOARD_X - 8
-local BOARD_H = display.contentHeight - BOARD_Y - 10
+local BOARD_H = (SCREEN_Y + SCREEN_H) - BOARD_Y - 10
 
-local NUM_COLS = #sampleLevel.rows[1]
-local NUM_ROWS = #sampleLevel.rows
-local TILE_SIZE = math.floor(math.min(BOARD_W / NUM_COLS, BOARD_H / NUM_ROWS))
+local TILE_SIZE = 48
 
-local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE, tunnels = sampleLevel.tunnels })
+local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
 
--- Board background: fills the board area so any map underflow is clean.
+-- Board background: fills the whole viewport so any map underflow is clean.
 local boardBg = display.newRect(BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2, BOARD_W, BOARD_H)
 boardBg:setFillColor(0.05, 0.05, 0.07)
 
--- worldGroup holds everything board-related (tiles, tap rect, pawns).
--- It sits directly on stage; the sidebar and title overlay on top handle
--- any right/top overflow. No container clipping needed.
+-- Viewport container: clips worldGroup to the board area and sits at the
+-- viewport's screen center, so world point (0,0) in camera math maps to
+-- that screen center -- see modules/camera.lua's docstring. worldGroup
+-- holds everything board-related (tiles, tap rect, pawns).
+local boardContainer = display.newContainer(BOARD_W, BOARD_H)
+boardContainer.x, boardContainer.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
+
 local worldGroup = display.newGroup()
+boardContainer:insert(worldGroup)
 
 map:draw(worldGroup)
 
@@ -72,8 +81,7 @@ local cam = camera.new({
     worldGroup = worldGroup,
     worldW = map.pixelW, worldH = map.pixelH,
     viewportW = BOARD_W, viewportH = BOARD_H,
-    boardCenterX = BOARD_X + BOARD_W / 2,
-    boardCenterY = BOARD_Y + BOARD_H / 2,
+    boardCenterX = 0, boardCenterY = 0, -- container already centers on screen
     panTime = 180,
 })
 
@@ -130,6 +138,21 @@ local modeLabel = display.newText({
 })
 modeLabel:setFillColor(0.6, 0.85, 1)
 
+-- Selected pawn's full kit: its Move/Facing-trigger ability (the one
+-- wired to movingAbility -- Push/Pull/Kick/Throw/Swap), its Active/
+-- Passive/Flow abilities (pawn.abilities, split by abltMng.TRIGGER), and
+-- its Traits (pawn.traits, via traitMng). Passive/Flow will read "--" for
+-- every pawn today since no default ability registers with those
+-- triggers yet (see abltMng.lua's taxonomy comment) -- the rows are here
+-- so they display the moment one exists.
+local abilitiesText = display.newText({
+    parent = sidebarGroup, text = "",
+    x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 108, font = native.systemFont, fontSize = 11,
+    width = SIDEBAR_W - 16,
+})
+abilitiesText.anchorY = 0
+abilitiesText:setFillColor(0.8, 0.8, 0.87)
+
 local logText = display.newText({
     parent = sidebarGroup, text = "",
     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + BOARD_H - 90, font = native.systemFont, fontSize = 12,
@@ -154,11 +177,53 @@ local function updateSelectedLabel(pawn)
     selectedLabel.text = string.format("%s\nHP %s", pawn.name, hpText)
 end
 
+local function namesOrDash(names)
+    if #names == 0 then return "--" end
+    return table.concat(names, ", ")
+end
+
+local function updateAbilitiesLabel(pawn)
+    if not pawn then
+        abilitiesText.text = ""
+        return
+    end
+
+    local moveDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
+
+    local activeNames, passiveNames, flowNames = {}, {}, {}
+    for _, id in ipairs(pawn.abilities or {}) do
+        local def = abltMng.get(id)
+        if def then
+            if def.trigger == abltMng.TRIGGER.PASSIVE then
+                table.insert(passiveNames, def.name)
+            elseif def.trigger == abltMng.TRIGGER.FLOW then
+                table.insert(flowNames, def.name)
+            else
+                table.insert(activeNames, def.name)
+            end
+        end
+    end
+
+    local traitNames = {}
+    for traitId in pairs(pawn.traits or {}) do
+        local def = traitMng.get(traitId)
+        table.insert(traitNames, def and def.name or traitId)
+    end
+    table.sort(traitNames)
+
+    abilitiesText.text = string.format(
+        "Move: %s\nActive: %s\nPassive: %s\nFlow: %s\nTraits: %s",
+        moveDef and moveDef.name or "--",
+        namesOrDash(activeNames), namesOrDash(passiveNames), namesOrDash(flowNames),
+        namesOrDash(traitNames)
+    )
+end
+
 -- small show/hide toggle for the sidebar, pinned outside sidebarGroup so
 -- it stays put (and tappable) even while the sidebar itself is hidden
 local sidebarVisible = true
 local toggleBtn = display.newGroup()
-local TOGGLE_X, TOGGLE_Y = display.contentWidth - 20, 20
+local TOGGLE_X, TOGGLE_Y = SCREEN_X + SCREEN_W - 20, 20
 local toggleBg = display.newRoundedRect(toggleBtn, TOGGLE_X, TOGGLE_Y, 28, 28, 6)
 toggleBg:setFillColor(0.2, 0.2, 0.26)
 toggleBg.strokeWidth = 1
@@ -214,6 +279,7 @@ updtr.onStateChanged = function() history:snapshot() end
 Runtime:addEventListener("pawnSelected", function(event)
     local pawn = dplyr:getById(event.pawnId)
     updateSelectedLabel(pawn)
+    updateAbilitiesLabel(pawn)
     if pawn then focusCameraOnGrid(pawn.col, pawn.row) end
 end)
 
@@ -222,6 +288,12 @@ Runtime:addEventListener("pawnMoved", function(event)
         focusCameraOnGrid(event.col, event.row)
     end
     updateSelectedLabel(con:getSelected())
+end)
+
+Runtime:addEventListener("traitChanged", function(event)
+    if event.pawnId == con.selectedId then
+        updateAbilitiesLabel(con:getSelected())
+    end
 end)
 
 Runtime:addEventListener("controlModeChanged", function(event)
@@ -241,6 +313,7 @@ end)
 Runtime:addEventListener("abilityResolved", function(event)
     logText.text = event.success and "Ability resolved." or "Ability failed / invalid target."
     updateSelectedLabel(con:getSelected())
+    updateAbilitiesLabel(con:getSelected())
 end)
 
 Runtime:addEventListener("levelCleared", function()

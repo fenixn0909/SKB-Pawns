@@ -14,11 +14,11 @@ abltMng.registerDefaults()
 traitMng.registerDefaults()
 
 line("BUILD MAP")
-local map = chessMap.new(sampleLevel.rows, { tileSize = 48, tunnels = sampleLevel.tunnels })
+local map = chessMap.new(sampleLevel.rows, { tileSize = 48, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
 print(string.format("cols=%d rows=%d tileSize=%d spawnPCs=%d spawnEnemies=%d goals=%d",
     map.cols, map.rows, map.tileSize, #map.spawnPCs, #map.spawnEnemies, #map:getGoalTiles()))
 assert(map.cols == 32 and map.rows == 15, "map dimensions wrong")
-assert(#map.spawnPCs == 6 and #map.spawnEnemies == 5, "spawn counts wrong")
+assert(#map.spawnPCs == 8 and #map.spawnEnemies == 5, "spawn counts wrong")
 
 local fakeGroup = display.newGroup()
 map:draw(fakeGroup)
@@ -50,6 +50,13 @@ local treant, spitter = enemies[4], enemies[5]
 line("MOVEMENT")
 con:select(knight.id)
 assert(con.selectedId == knight.id, "select failed")
+-- Knight's movingAbility is "push" (MOVING trigger), so requestMove/
+-- requestStep don't do a plain move -- a push-fallback step happens when
+-- the target tile's empty, but a pawn there gets shoved. Testing baseline
+-- movement semantics from Knight's native spawn (4,2) would silently push
+-- Mage (at the adjacent spawn (5,2)) out of position. Park Knight on open
+-- scratch floor first so these moves land on empty tiles as intended.
+dplyr:moveTo(knight.id, 13, 8)
 local startCol, startRow = knight.col, knight.row
 local ok, reason = updtr:requestMove(knight, startCol + 1, startRow)
 assert(ok, "knight should be able to move 1 tile onto open floor: " .. tostring(reason))
@@ -123,11 +130,12 @@ print("guard OK: push absorbed, status consumed")
 -- ------------------------------------------------------------- DRAG
 line("DRAG ABILITY")
 -- line mage up with guardian for a pull test, 2 tiles apart on same row
-dplyr:moveTo(mage.id, 4, 4)
-dplyr:moveTo(guardian.id, 6, 4)
+-- (cols 14/16 -- clear of any spawn tile or extra furniture on row 4)
+dplyr:moveTo(mage.id, 14, 4)
+dplyr:moveTo(guardian.id, 16, 4)
 local dragOk = updtr:useAbility(mage, "drag", guardian)
 assert(dragOk, "drag should succeed on a pawn in a clear line within range")
-assert(guardian.col == 5 and guardian.row == 4, "guardian should be pulled one tile toward mage, got (" .. guardian.col .. "," .. guardian.row .. ")")
+assert(guardian.col == 15 and guardian.row == 4, "guardian should be pulled one tile toward mage, got (" .. guardian.col .. "," .. guardian.row .. ")")
 print("drag OK: guardian pulled to", guardian.col, guardian.row)
 
 -- ------------------------------------------------------------- FIRE BEAM
@@ -169,11 +177,41 @@ print("hazard sink OK after", ticks, "ticks -- tile is now VOID, occupant remove
 line("CLEAR CONDITION")
 local capturedClear = false
 Runtime:addEventListener("levelCleared", function() capturedClear = true end)
-local goal = map:getGoalTiles()[1]
-dplyr:moveTo(knight.id, goal.col, goal.row)
+local goals = map:getGoalTiles()
+assert(#goals == 3, "expected 3 goal tiles, got " .. #goals)
+dplyr:moveTo(knight.id, goals[1].col, goals[1].row)
 updtr:checkClearCondition()
-assert(capturedClear, "levelCleared event should have fired once the (only) goal tile is PC-occupied")
-print("clear condition OK: levelCleared fired")
+assert(not capturedClear, "levelCleared should NOT fire with only 1 of 3 goals held")
+dplyr:moveTo(mage.id, goals[2].col, goals[2].row)
+updtr:checkClearCondition()
+assert(not capturedClear, "levelCleared should NOT fire with only 2 of 3 goals held")
+dplyr:moveTo(guardian.id, goals[3].col, goals[3].row)
+updtr:checkClearCondition()
+assert(capturedClear, "levelCleared event should have fired once all 3 goal tiles are PC-occupied")
+print("clear condition OK: levelCleared fired once all 3 goals were held")
+
+-- ------------------------------------------------------------ CAGE GATES
+line("CAGE MECHANISM -- BUTTON OPENS ITS PAIRED CAGE, CLOSES WHEN VACATED")
+assert(map:getTile(17, 13).type == "cage", "cage_a should start closed")
+assert(not map:isWalkable(17, 13), "a closed cage should block movement")
+dplyr:moveTo(knight.id, 16, 13) -- onto cage_a's button
+updtr:checkClearCondition() -- cages are ticked as part of this -- see chessUpdtr:tickCages
+assert(map:getTile(17, 13).type == "cage_open", "cage_a should open once a pawn stands on its button")
+assert(map:isWalkable(17, 13), "an open cage should be walkable")
+dplyr:moveTo(knight.id, 10, 13) -- step off the button
+updtr:checkClearCondition()
+assert(map:getTile(17, 13).type == "cage", "cage_a should close again once its button is vacated")
+assert(not map:isWalkable(17, 13), "a closed cage should block movement again")
+
+assert(map:getTile(25, 14).type == "cage", "cage_b should start closed")
+dplyr:moveTo(mage.id, 24, 14) -- onto cage_b's button
+updtr:checkClearCondition()
+assert(map:getTile(25, 14).type == "cage_open", "cage_b should open independently of cage_a")
+assert(map:getTile(17, 13).type == "cage", "cage_a should still be closed -- the two sets are independent")
+dplyr:moveTo(mage.id, 22, 14) -- step off the button
+updtr:checkClearCondition()
+assert(map:getTile(25, 14).type == "cage", "cage_b should close again once its button is vacated")
+print("cage OK: both gates open on their own button and close independently when vacated")
 
 -- ------------------------------------------------------------- TURN CYCLE
 line("TURN CYCLE / ENEMY AI PHASE")
@@ -313,9 +351,15 @@ print("lightweight OK: mage carried an extra tile to", mage.col, mage.row)
 -- ----------------------------------------------------------- STEALTH TRAIT
 line("STEALTH TRAIT -- GRANTED/REVOKED AT RUNTIME, SKIPS ENEMY AUTO-TARGETING")
 assert(not dplyr:hasTrait(knight, "stealth"), "knight should not have stealth natively")
-dplyr:moveTo(turret.id, 3, 4)
+-- row 4 has Slinger's spawn at col 3 and Scout's at col 6 -- both still
+-- unmoved this early in the file. Start turret at col 2 (west of Slinger)
+-- and relocate Scout out of the test lane first so it survives (removing
+-- it outright would break the tunnel tests that need it later).
+dplyr:moveTo(scout.id, 17, 4)
+dplyr:moveTo(slinger.id, 18, 4)
+dplyr:moveTo(turret.id, 2, 4)
 dplyr:moveTo(knight.id, 10, 4)
-for c = 4, 9 do
+for c = 3, 9 do
     local occ = dplyr:getAt(c, 4)
     if occ and occ.id ~= turret.id and occ.id ~= knight.id then dplyr:remove(occ.id) end
 end
@@ -484,32 +528,38 @@ print("generalized AI OK: knight hp", knightHp8, "->", knight.hp, "-- mage hp", 
 dplyr:moveTo(treant.id, 30, 11) -- park back near its spawn -- the Throw tests below reuse row 8
 dplyr:moveTo(knight.id, 3, 12)
 
--- --------------------------------------------------------- KICK (MOVING)
-line("KICK (MOVING) -- SLIDES UNTIL BLOCKED, FACING NEVER CHANGES")
-dplyr:moveTo(brawler.id, 3, 2)
+-- --------------------------------------------------------- KICK (FACING)
+line("KICK (FACING) -- TRIGGERS ON AN ADJACENT PAWN WITHOUT MOVING, SLIDES UNTIL BLOCKED")
+dplyr:moveTo(brawler.id, 4, 2)
 local kickTarget = dplyr:deploy("stone_a", 5, 2)
 local kickBlocker = dplyr:deploy("stone_b", 10, 2)
 local kickFacingBefore = { kickTarget.facing[1], kickTarget.facing[2] }
 local kickOk = updtr:requestStep(brawler, 1, 0)
-assert(kickOk, "kick should succeed: brawler steps forward normally")
-assert(brawler.col == 4 and brawler.row == 2, "brawler should have moved one tile east")
+assert(kickOk, "kick should succeed: adjacent pawn triggers the kick")
+assert(brawler.col == 4 and brawler.row == 2, "brawler should NOT move -- facing-trigger fires in place")
 assert(kickTarget.col == 9 and kickTarget.row == 2, "kicked stone should slide until just before the blocker, got " .. kickTarget.col)
 assert(kickTarget.facing[1] == kickFacingBefore[1] and kickTarget.facing[2] == kickFacingBefore[2],
     "a kicked pawn's own facing should never change")
-print("kick OK: brawler at", brawler.col, brawler.row, "-- kicked stone slid to", kickTarget.col)
+print("kick OK: brawler stayed at", brawler.col, brawler.row, "-- kicked stone slid to", kickTarget.col)
 dplyr:remove(kickTarget.id); dplyr:remove(kickBlocker.id)
 
--- -------------------------------------------------------- KICK+ (MOVING)
-line("KICK+ (MOVING) -- KICKS EVERY LINED-UP PAWN, FARTHEST FIRST")
+line("KICK (FACING) -- FALLS BACK TO A NORMAL STEP WHEN NOTHING'S ADJACENT")
+local kickStepOk = updtr:requestStep(brawler, 1, 0)
+assert(kickStepOk, "kick should fall back to a normal step")
+assert(brawler.col == 5 and brawler.row == 2, "brawler should have moved one tile east")
+print("kick fallback OK: brawler moved to", brawler.col, brawler.row)
+
+-- -------------------------------------------------------- KICK+ (FACING)
+line("KICK+ (FACING) -- KICKS EVERY LINED-UP PAWN, FARTHEST FIRST")
 brawler.movingAbility = "kick_plus"
-dplyr:moveTo(brawler.id, 3, 2)
+dplyr:moveTo(brawler.id, 4, 2)
 local k1 = dplyr:deploy("stone_a", 5, 2)
 local k2 = dplyr:deploy("stone_b", 6, 2)
 local k3 = dplyr:deploy("stone_c", 7, 2)
 local kickBlocker2 = dplyr:deploy("stone_a", 12, 2)
 local kickPlusOk = updtr:requestStep(brawler, 1, 0)
 assert(kickPlusOk, "kick_plus should succeed")
-assert(brawler.col == 4, "brawler should have moved one tile east")
+assert(brawler.col == 4, "brawler should NOT move -- facing-trigger fires in place")
 assert(k3.col == 11, "farthest pawn (kicked first, most room) should end up farthest, got " .. k3.col)
 assert(k2.col == 10, "middle pawn should end up just behind it, got " .. k2.col)
 assert(k1.col == 9, "nearest pawn should end up just behind that, got " .. k1.col)
@@ -517,41 +567,48 @@ print("kick_plus OK: chain resolved to", k1.col, k2.col, k3.col)
 dplyr:remove(k1.id); dplyr:remove(k2.id); dplyr:remove(k3.id); dplyr:remove(kickBlocker2.id)
 brawler.movingAbility = "kick" -- restore
 
--- ---------------------------------------------------------- THROW (MOVING)
-line("THROW (MOVING) -- LANDS 2 TILES AWAY ON AN EMPTY TILE")
-dplyr:moveTo(slinger.id, 3, 4)
+-- ---------------------------------------------------------- THROW (FACING)
+line("THROW (FACING) -- TRIGGERS ON AN ADJACENT PAWN WITHOUT MOVING, LANDS 2 TILES AWAY")
+dplyr:moveTo(slinger.id, 4, 4)
 local throwTarget = dplyr:deploy("stone_a", 5, 4)
 local throwOk = updtr:requestStep(slinger, 1, 0)
-assert(throwOk, "throw should succeed: slinger steps forward normally")
-assert(slinger.col == 4 and slinger.row == 4, "slinger should have moved one tile east")
+assert(throwOk, "throw should succeed: adjacent pawn triggers the throw")
+assert(slinger.col == 4 and slinger.row == 4, "slinger should NOT move -- facing-trigger fires in place")
 assert(throwTarget.col == 7 and throwTarget.row == 4, "thrown stone should land 2 tiles from its start, got " .. throwTarget.col)
-print("throw OK: slinger at", slinger.col, slinger.row, "-- thrown stone landed at", throwTarget.col)
+print("throw OK: slinger stayed at", slinger.col, slinger.row, "-- thrown stone landed at", throwTarget.col)
 dplyr:remove(throwTarget.id)
 
+line("THROW (FACING) -- FALLS BACK TO A NORMAL STEP WHEN NOTHING'S ADJACENT")
+local throwStepOk = updtr:requestStep(slinger, 1, 0)
+assert(throwStepOk, "throw should fall back to a normal step")
+assert(slinger.col == 5 and slinger.row == 4, "slinger should have moved one tile east")
+print("throw fallback OK: slinger moved to", slinger.col, slinger.row)
+
 line("THROW -- JUMPS CLEAN OVER A PAWN ON THE 1ST GRID (IGNORED, NOT A WALL)")
-dplyr:moveTo(slinger.id, 2, 8)
+dplyr:moveTo(slinger.id, 3, 8)
 local throwTarget2 = dplyr:deploy("stone_a", 4, 8)
 local overPawn = dplyr:deploy("stone_b", 5, 8)
 local throwOk2 = updtr:requestStep(slinger, 1, 0)
 assert(throwOk2, "throw should succeed")
+assert(slinger.col == 3 and slinger.row == 8, "slinger should NOT move -- facing-trigger fires in place")
 assert(throwTarget2.col == 6 and throwTarget2.row == 8, "thrown stone should land on the 2nd grid, jumping clean over the 1st, got " .. throwTarget2.col)
 assert(overPawn.col == 5, "the pawn jumped over should not have moved")
 print("throw OK: jumped clean over a pawn, landed at", throwTarget2.col)
 dplyr:remove(throwTarget2.id); dplyr:remove(overPawn.id)
 
-line("THROW -- BLOCKED BY A WALL (THE STEP STILL SUCCEEDS, THE THROW DOESN'T)")
-dplyr:moveTo(slinger.id, 9, 6) -- row 6 has a wall at col 12
+line("THROW -- BLOCKED BY A WALL (FACING-TRIGGER STILL FIRES, THE THROW ITSELF FAILS)")
+dplyr:moveTo(slinger.id, 10, 6) -- row 6 has a wall at col 12
 local throwTarget3 = dplyr:deploy("stone_a", 11, 6)
 local throwWallOk = updtr:requestStep(slinger, 1, 0)
-assert(throwWallOk, "the move itself should still succeed even though the throw is wall-blocked")
-assert(slinger.col == 10 and slinger.row == 6, "slinger should have moved one tile east")
+assert(throwWallOk, "requestStep should still report ok -- the facing-trigger fired, even though the throw itself was wall-blocked")
+assert(slinger.col == 10 and slinger.row == 6, "slinger should NOT move -- facing-trigger fires in place")
 assert(throwTarget3.col == 11 and throwTarget3.row == 6, "the stone should NOT have been thrown -- a wall blocks the jump")
 print("throw OK: wall correctly blocked the jump, stone stayed at", throwTarget3.col)
 dplyr:remove(throwTarget3.id)
 
 -- ------------------------------------------- JUMP-LANDING RESOLUTION TABLE
 line("JUMP LANDING -- CASE A: ARMORED JUMPER CRUSHES THE BED PAWN")
-dplyr:moveTo(slinger.id, 2, 8)
+dplyr:moveTo(slinger.id, 3, 8)
 local jmpA = dplyr:deploy("stone_a", 4, 8)
 dplyr:addTrait(jmpA.id, "armor")
 local bedA = dplyr:deploy("stone_b", 6, 8)
@@ -563,7 +620,7 @@ print("jump-landing OK (case a): armored jumper crushed the bed pawn, landed at"
 dplyr:remove(jmpA.id)
 
 line("JUMP LANDING -- CASE B: SPIKE-HEADED BED PAWN IMPALES THE JUMPER")
-dplyr:moveTo(slinger.id, 2, 8)
+dplyr:moveTo(slinger.id, 3, 8)
 local jmpB = dplyr:deploy("stone_a", 4, 8)
 local bedB = dplyr:deploy("stone_b", 6, 8)
 dplyr:addTrait(bedB.id, "spike_headed")
@@ -575,7 +632,7 @@ print("jump-landing OK (case b): jumper impaled itself on the spike-headed bed p
 dplyr:remove(bedB.id)
 
 line("JUMP LANDING -- CASE C: NEITHER SIDE PROTECTED -- BOTH DIE")
-dplyr:moveTo(slinger.id, 2, 8)
+dplyr:moveTo(slinger.id, 3, 8)
 local jmpC = dplyr:deploy("stone_a", 4, 8)
 local bedC = dplyr:deploy("stone_b", 6, 8)
 assert(updtr:requestStep(slinger, 1, 0), "throw should succeed")
@@ -584,7 +641,7 @@ assert(dplyr:getById(bedC.id) == nil, "bed pawn should have died too (case c: mu
 print("jump-landing OK (case c): both jumper and bed pawn died")
 
 line("JUMP LANDING -- CASE D: LIGHTWEIGHT JUMPER TAPS AND BOUNCES ONWARD")
-dplyr:moveTo(slinger.id, 2, 8)
+dplyr:moveTo(slinger.id, 3, 8)
 local jmpD = dplyr:deploy("stone_a", 4, 8)
 dplyr:addTrait(jmpD.id, "lightweight")
 local bedD = dplyr:deploy("stone_b", 6, 8)
@@ -597,7 +654,7 @@ print("jump-landing OK (case d): lightweight jumper tapped the bed pawn, bounced
 dplyr:remove(jmpD.id); dplyr:remove(bedD.id)
 
 line("JUMP LANDING -- CASE D CHAINS THROUGH MULTIPLE BED PAWNS")
-dplyr:moveTo(slinger.id, 2, 8)
+dplyr:moveTo(slinger.id, 3, 8)
 local jmpD2 = dplyr:deploy("stone_a", 4, 8)
 dplyr:addTrait(jmpD2.id, "lightweight")
 local bedD2a = dplyr:deploy("stone_b", 6, 8)
@@ -611,11 +668,11 @@ print("jump-landing OK: chained through 2 bed pawns, landed at", jmpD2After.col)
 dplyr:remove(jmpD2.id); dplyr:remove(bedD2a.id); dplyr:remove(bedD2b.id)
 
 line("JUMP LANDING -- CASE D DIES IF IT BOUNCES INTO A WALL")
-dplyr:moveTo(slinger.id, 7, 6) -- row 6 has a wall at col 12
+dplyr:moveTo(slinger.id, 8, 6) -- row 6 has a wall at col 12
 local jmpD3 = dplyr:deploy("stone_a", 9, 6)
 dplyr:addTrait(jmpD3.id, "lightweight")
 local bedD3 = dplyr:deploy("stone_b", 11, 6)
-assert(updtr:requestStep(slinger, 1, 0), "the throw ability's own move should still succeed")
+assert(updtr:requestStep(slinger, 1, 0), "the throw ability's own facing-trigger should still report ok")
 assert(dplyr:getById(jmpD3.id) == nil, "lightweight jumper should die bouncing into a wall")
 assert(dplyr:getById(bedD3.id), "the tapped bed pawn should survive")
 print("jump-landing OK: lightweight jumper died bouncing into a wall; tapped bed pawn survived")

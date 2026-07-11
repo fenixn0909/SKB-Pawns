@@ -49,6 +49,14 @@ function camera.new(opts)
     return self
 end
 
+-- Single source of truth for positioning worldGroup: centerX/centerY is
+-- where the viewport's center sits in worldGroup's *parent* space (0,0
+-- when worldGroup lives inside a container that's already positioned at
+-- the viewport's screen center -- see the module docstring). Previously
+-- this was defined twice, and the second (dead-code-shadowing) copy
+-- silently dropped centerX/centerY, so :setZoom() and :focusOn() disagreed
+-- about where the viewport center was -- that mismatch was the source of
+-- the camera "jumping" oddly on zoom.
 local function applyZoom(self)
     local targetX = self.centerX - self.focusX * self.zoom
     local targetY = self.centerY - self.focusY * self.zoom
@@ -63,12 +71,6 @@ local function clampAxis(desired, worldDim, viewportDim)
     if desired < minV then return minV end
     if desired > maxV then return maxV end
     return desired
-end
-
-local function applyZoom(self)
-    local targetX = -self.focusX * self.zoom
-    local targetY = -self.focusY * self.zoom
-    self.worldGroup.x, self.worldGroup.y = targetX, targetY
 end
 
 -- Pans (animated by default) so world point (worldX, worldY) ends up at

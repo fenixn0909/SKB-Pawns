@@ -58,6 +58,10 @@ function display.newPolygon(parentOrX, xOrY, yOrVertices, vertices)
     return fakeDisplayObject({})
 end
 
+function display.newCircle(parentOrX, xOrY, yOrRadius, radius)
+    return fakeDisplayObject({})
+end
+
 function display.newText(params)
     local obj = fakeDisplayObject({ text = params and params.text or "" })
     return obj
@@ -75,8 +79,18 @@ function transition.to(obj, params)
     end
     if params.onComplete then params.onComplete(obj) end
 end
+function transition.cancel(obj) end
 
-easing = { outQuad = "outQuad" }
+easing = { outQuad = "outQuad", inQuad = "inQuad" }
+
+-- timer.performWithDelay applies immediately (no real async needed for
+-- headless tests) -- mirrors transition.to's "apply immediately" stance.
+timer = {}
+function timer.performWithDelay(delay, fn, iterations)
+    if fn then fn() end
+    return { cancelled = false }
+end
+function timer.cancel(handle) end
 
 local listeners = {}
 Runtime = {}

@@ -54,45 +54,74 @@ function chessUpdtr:buildCtx()
         return dplyr:hasTrait(p, "armor") or dplyr:hasTrait(p, "protected")
     end
 
+    -- constant px/sec pacing for slides -- see kickSlide and resolveJumpLanding
+    local MOVE_MS_PER_TILE = 90
+
+    -- forward-declared: resolveJumpArrival (below) calls this recursively
+    -- for a lightweight pawn's bounce-onward hop
+    local resolveJumpLanding
+
     -- The jump-landing resolution table (see Throw, below). jmpPawn has
-    -- just tried to land on (landCol,landRow) while traveling (dCol,dRow);
-    -- bedPawn is whoever's already standing there, if anyone:
+    -- just VISUALLY ARRIVED at (landCol,landRow) after hopping there while
+    -- traveling (dCol,dRow); bedPawn is whoever was already standing
+    -- there when the hop started, if anyone. This only runs once the hop's
+    -- animation finishes (see the timer.performWithDelay call below it's
+    -- scheduled from) -- resolving it earlier (like this used to) meant
+    -- bedPawn could die before the jumper had visibly gone anywhere,
+    -- which read as pawns just vanishing with no way to tell what happened:
     --   a. jmpPawn Armored/Protected             -> bedPawn dies, jmpPawn lands
     --   b. bedPawn Spike-Headed (jmpPawn isn't a) -> jmpPawn dies
     --   c. neither of the above, jmpPawn isn't
     --      Lightweight either                    -> both die
     --   d. jmpPawn Lightweight (neither a nor b)  -> taps bedPawn, keeps
     --      jumping to the next grid onward (recurses); dies if that's a wall
-    local function resolveJumpLanding(jmpPawn, landCol, landRow, dCol, dRow)
-        local bedPawn = dplyr:getAt(landCol, landRow)
-        if not bedPawn then
-            dplyr:moveTo(jmpPawn.id, landCol, landRow)
+    local function resolveJumpArrival(jmpPawn, bedPawn, landCol, landRow, dCol, dRow)
+        -- defensive: bail if either side is already gone by the time this
+        -- fires (shouldn't normally happen in a turn-based game, but avoid
+        -- acting on stale references if it ever does)
+        if not dplyr:getById(jmpPawn.id) or not dplyr:getById(bedPawn.id) then
+            self:checkClearCondition()
+            self:notifyChanged()
             return
         end
 
         if isArmored(jmpPawn) then
             killPawn(bedPawn.id)
-            dplyr:moveTo(jmpPawn.id, landCol, landRow)
-            return
-        end
-
-        if dplyr:hasTrait(bedPawn, "spike_headed") then
+        elseif dplyr:hasTrait(bedPawn, "spike_headed") then
             killPawn(jmpPawn.id)
-            return
-        end
-
-        if dplyr:hasTrait(jmpPawn, "lightweight") then
+        elseif dplyr:hasTrait(jmpPawn, "lightweight") then
             local nextCol, nextRow = landCol + dCol, landRow + dRow
             if not map:isWalkable(nextCol, nextRow, jmpPawn) then
                 killPawn(jmpPawn.id) -- hit a wall while bouncing onward
-                return
+            else
+                resolveJumpLanding(jmpPawn, nextCol, nextRow, dCol, dRow, 1)
             end
-            resolveJumpLanding(jmpPawn, nextCol, nextRow, dCol, dRow)
-            return
+        else
+            killPawn(bedPawn.id)
+            killPawn(jmpPawn.id)
         end
 
-        killPawn(bedPawn.id)
-        killPawn(jmpPawn.id)
+        self:checkClearCondition()
+        self:notifyChanged()
+    end
+
+    -- hopTiles: how many tiles THIS leg of the hop covers (2 for the
+    -- initial throw, 1 for each further lightweight bounce) -- sets the
+    -- animation duration so every leg moves at the same constant speed
+    -- (see MOVE_MS_PER_TILE) regardless of how far it travels.
+    resolveJumpLanding = function(jmpPawn, landCol, landRow, dCol, dRow, hopTiles)
+        local duration = (hopTiles or 2) * MOVE_MS_PER_TILE
+        -- captured now, before jmpPawn's own moveTo (below) claims this
+        -- tile's occupancy slot -- see pawnDplyr:_clearOccupancyIfOwner
+        local bedPawn = dplyr:getAt(landCol, landRow)
+
+        dplyr:moveTo(jmpPawn.id, landCol, landRow, { jump = true, duration = duration })
+
+        if not bedPawn then return end -- clean landing, nothing to resolve
+
+        timer.performWithDelay(duration, function()
+            resolveJumpArrival(jmpPawn, bedPawn, landCol, landRow, dCol, dRow)
+        end)
     end
 
     local function kickSlide(pawn, dCol, dRow)
@@ -104,7 +133,9 @@ function chessUpdtr:buildCtx()
             c, r = nc, nr
         end
         if c ~= pawn.col or r ~= pawn.row then
-            dplyr:moveTo(pawn.id, c, r) -- no setFacing -- a kicked pawn's own facing never changes
+            local distance = math.max(math.abs(c - pawn.col), math.abs(r - pawn.row))
+            -- no setFacing -- a kicked pawn's own facing never changes
+            dplyr:moveTo(pawn.id, c, r, { duration = distance * MOVE_MS_PER_TILE })
         end
     end
 
@@ -385,11 +416,12 @@ local function isUnitCardinal(dCol, dRow)
 end
 
 -- Moves a pawn exactly one tile in direction (dCol, dRow), e.g. (0,-1) for
--- "up" -- UNLESS the pawn has a MOVING-trigger ability assigned
+-- "up" -- UNLESS the pawn has a MOVING- or FACING-trigger ability assigned
 -- (pawn.movingAbility), in which case that ability decides what a
--- directional input does instead (see modules/abltMng.lua's Push/Swap/Pull
--- family). Facing always updates to the input direction first, regardless
--- of which path handles the actual movement, since Swap depends on it.
+-- directional input does instead (see modules/abltMng.lua's Push/Swap/Pull/
+-- Kick/Throw family). Facing always updates to the input direction first,
+-- regardless of which path handles the actual movement, since Swap/Kick/
+-- Throw all depend on it.
 function chessUpdtr:requestStep(pawn, dCol, dRow)
     local expectedFaction = (self.turn == chessUpdtr.TURN.PC) and "pc" or "enemy"
     if pawn.faction ~= expectedFaction then
@@ -402,7 +434,7 @@ function chessUpdtr:requestStep(pawn, dCol, dRow)
     self.dplyr:setFacing(pawn.id, dCol, dRow)
 
     local movingDef = pawn.movingAbility and abltMng.get(pawn.movingAbility)
-    if movingDef and movingDef.trigger == abltMng.TRIGGER.MOVING then
+    if movingDef and (movingDef.trigger == abltMng.TRIGGER.MOVING or movingDef.trigger == abltMng.TRIGGER.FACING) then
         local result = movingDef.execute(pawn, { dCol = dCol, dRow = dRow }, self.ctx) or {}
         local ok = (result.ok ~= false)
         if ok then
@@ -541,7 +573,26 @@ function chessUpdtr:tickHazards()
 end
 
 -- --------------------------------------------------------------- OUTCOME
+-- Opens/closes every cage group based on whether any of its button tiles
+-- currently has a pawn on it (either faction -- "any pawn stands on the
+-- button" per the mechanic, not just PCs). Cheap and idempotent, so it's
+-- safe to just call this on every action rather than tracking deltas.
+function chessUpdtr:tickCages()
+    for groupId, group in pairs(self.map.cageGroups) do
+        local isOpen = false
+        for _, spot in ipairs(group.buttons) do
+            if self.dplyr:getAt(spot.col, spot.row) then
+                isOpen = true
+                break
+            end
+        end
+        self.map:setCageOpen(groupId, isOpen)
+    end
+end
+
 function chessUpdtr:checkClearCondition()
+    self:tickCages()
+
     local goals = self.map:getGoalTiles()
     if #goals == 0 then return end
 

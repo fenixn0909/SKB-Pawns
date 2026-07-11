@@ -258,6 +258,19 @@ function pawnDplyr:_buildVisuals(pawn, info)
     pawn.container = container
     pawn._kindInfo = info -- re-looked-up by :_applySprite whenever facing changes
 
+    -- Drop shadow: hidden at ground level (alpha 0) until moveTo's jump
+    -- effect fades it in, so a pawn mid-Throw (or a lightweight pawn
+    -- bouncing onward) is visibly airborne. Inserted before the sprite so
+    -- it always renders behind it -- see :_applySprite, which re-asserts
+    -- this ordering whenever facing swaps the sprite out.
+    -- Solar2D has no display.newEllipse -- the standard trick is a circle
+    -- squashed with yScale.
+    local shadow = display.newCircle(container, 0, size * 0.32, size * 0.30)
+    shadow.yScale = 0.12 / 0.30
+    shadow:setFillColor(0, 0, 0, 0.4)
+    shadow.alpha = 0
+    pawn.shadow = shadow
+
     local sprite = display.newImageRect(container, self:_spritePathFor(info, pawn), size * 0.86, size * 0.86)
     sprite.x, sprite.y = 0, 0
     pawn.sprite = sprite
@@ -266,7 +279,7 @@ function pawnDplyr:_buildVisuals(pawn, info)
     if pawn.hp then
         local hpText = display.newText({
             parent = container, text = tostring(pawn.hp),
-            x = size * 0.20, y = -size * 0.20, font = native.systemFontBold, fontSize = math.max(8, math.floor(size * 0.5)),
+            x = size * 0.20, y = -size * 0.20, font = native.systemFontBold, fontSize = math.max(8, math.floor(size * 0.25)),
         })
         hpText:setFillColor(1, 1, 1)
         pawn.hpText = hpText
@@ -437,6 +450,7 @@ function pawnDplyr:_applySprite(pawn)
     sprite.x, sprite.y = 0, 0
     pawn.container:insert(1, sprite) -- keep it behind the HP label
     pawn.sprite = sprite
+    if pawn.shadow then pawn.container:insert(1, pawn.shadow) end -- re-assert shadow-behind-sprite order
 end
 
 -- Sets which way a pawn is looking (used by facing-dependent abilities
@@ -453,7 +467,7 @@ end
 function pawnDplyr:remove(pawnId)
     local pawn = self.pawns[pawnId]
     if not pawn then return end
-    self.occupancy[occKey(pawn.col, pawn.row)] = nil
+    self:_clearOccupancyIfOwner(pawnId, pawn.col, pawn.row)
     if pawn.container then pawn.container:removeSelf() end -- takes sprite/hpText/ring with it
     self.pawns[pawnId] = nil
 end
@@ -480,7 +494,18 @@ function pawnDplyr:isOccupied(col, row)
     return self.occupancy[occKey(col, row)] ~= nil
 end
 
--- ------------------------------------------------------------------- MOVE
+-- Clears the occupancy slot at (col,row) only if `pawnId` still owns it.
+-- Guards against a pawn's own old-tile cleanup wiping out a DIFFERENT
+-- pawn's occupancy record if that tile got claimed out from under it in
+-- the meantime -- e.g. a Throw's target tile, where the jumper's moveTo
+-- claims (landCol,landRow) immediately but the bed pawn's own col/row
+-- still say it's there too, until its (possibly delayed) removal runs.
+function pawnDplyr:_clearOccupancyIfOwner(pawnId, col, row)
+    if self.occupancy[occKey(col, row)] == pawnId then
+        self.occupancy[occKey(col, row)] = nil
+    end
+end
+
 -- Moves a pawn to a new grid cell and animates its sprite. Does NOT
 -- validate walkability/occupancy -- chessUpdtr is responsible for the
 -- rules; this module just carries out the relocation.
@@ -489,7 +514,7 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
     local pawn = self.pawns[pawnId]
     if not pawn then return end
 
-    self.occupancy[occKey(pawn.col, pawn.row)] = nil
+    self:_clearOccupancyIfOwner(pawnId, pawn.col, pawn.row)
     pawn.col, pawn.row = col, row
     self.occupancy[occKey(col, row)] = pawnId
 
@@ -503,7 +528,7 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
     if tile and tile.type == chessMap.TILE.TUNNEL then
         local exitCol, exitRow = self.map:getTunnelExit(col, row)
         if exitCol and not self:isOccupied(exitCol, exitRow) then
-            self.occupancy[occKey(col, row)] = nil
+            self:_clearOccupancyIfOwner(pawnId, col, row)
             pawn.col, pawn.row = exitCol, exitRow
             self.occupancy[occKey(exitCol, exitRow)] = pawnId
             col, row = exitCol, exitRow
@@ -512,7 +537,38 @@ function pawnDplyr:moveTo(pawnId, col, row, opts)
 
     local x, y = self.map:gridToWorld(col, row)
     local duration = opts.duration or 160
+    transition.cancel(pawn.container)
     transition.to(pawn.container, { x = x, y = y, time = duration, transition = easing.outQuad })
+
+    -- Jump/air-state readability: Throw's own hop and a lightweight
+    -- pawn's bounce-onward landing both pass opts.jump=true. The sprite
+    -- visibly lifts and scales up, with a drop shadow fading in beneath
+    -- it, then both settle back to normal on landing -- so a pawn mid-air
+    -- reads differently from a normal step, push, pull, swap, or kick
+    -- slide (none of which set opts.jump).
+    if opts.jump and pawn.sprite and pawn.shadow then
+        local size = self.map.tileSize
+        local liftY = -size * 0.35
+        local upTime = duration * 0.5
+        local downTime = duration - upTime
+        local sprite, shadow = pawn.sprite, pawn.shadow
+        transition.cancel(sprite)
+        transition.cancel(shadow)
+        sprite.y, sprite.xScale, sprite.yScale = 0, 1, 1
+        shadow.alpha = 0
+        transition.to(sprite, {
+            y = liftY, xScale = 1.18, yScale = 1.18, time = upTime, transition = easing.outQuad,
+            onComplete = function()
+                transition.to(sprite, { y = 0, xScale = 1, yScale = 1, time = downTime, transition = easing.inQuad })
+            end,
+        })
+        transition.to(shadow, {
+            alpha = 1, time = upTime, transition = easing.outQuad,
+            onComplete = function()
+                transition.to(shadow, { alpha = 0, time = downTime, transition = easing.inQuad })
+            end,
+        })
+    end
 
     Runtime:dispatchEvent({ name = "pawnMoved", pawnId = pawnId, col = col, row = row })
 end

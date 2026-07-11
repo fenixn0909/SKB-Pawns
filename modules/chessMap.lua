@@ -24,6 +24,9 @@ chessMap.TILE = {
     JAIL         = "jail",        -- bars: blocks everyone except a Tiny Size pawn
     WALL_HOLE    = "wall_hole",   -- a wall with a tiny hole under it: same rule as JAIL
     TUNNEL       = "tunnel",      -- Tiny-only; paired by id (see opts.tunnels), teleports on entry
+    CAGE         = "cage",        -- closed gate: blocks like a wall until its paired button is held
+    CAGE_OPEN    = "cage_open",   -- runtime-only state: same tile, currently open (walkable)
+    CAGE_BUTTON  = "cage_button", -- pressure plate: any pawn standing here opens its paired CAGE(s)
 }
 
 -- ASCII legend used by level data files (see data/sampleLevel.lua)
@@ -38,6 +41,8 @@ chessMap.LEGEND_CHARS = {
     ["J"] = chessMap.TILE.JAIL,
     ["H"] = chessMap.TILE.WALL_HOLE,
     ["T"] = chessMap.TILE.TUNNEL,
+    ["C"] = chessMap.TILE.CAGE,
+    ["B"] = chessMap.TILE.CAGE_BUTTON,
 }
 
 local TILE_COLORS = {
@@ -52,6 +57,9 @@ local TILE_COLORS = {
     [chessMap.TILE.JAIL]        = { 0.16, 0.17, 0.20 },
     [chessMap.TILE.WALL_HOLE]   = { 0.10, 0.10, 0.12 },
     [chessMap.TILE.TUNNEL]      = { 0.18, 0.12, 0.22 },
+    [chessMap.TILE.CAGE]        = { 0.24, 0.09, 0.09 },
+    [chessMap.TILE.CAGE_OPEN]   = { 0.10, 0.20, 0.11 },
+    [chessMap.TILE.CAGE_BUTTON] = { 0.22, 0.19, 0.07 },
 }
 
 -- terrain types that get an overlay sprite drawn on top of the floor color
@@ -63,6 +71,9 @@ local TILE_OVERLAY_IMAGE = {
     [chessMap.TILE.JAIL]      = "images/jail_bars.png",
     [chessMap.TILE.WALL_HOLE] = "images/wall_hole.png",
     [chessMap.TILE.TUNNEL]    = "images/tunnel.png",
+    [chessMap.TILE.CAGE]      = "images/cage_closed.png",
+    [chessMap.TILE.CAGE_OPEN] = "images/cage_open.png",
+    [chessMap.TILE.CAGE_BUTTON] = "images/cage_button.png",
 }
 
 -- tile types only a Tiny Size pawn can enter -- everyone else is blocked
@@ -108,6 +119,7 @@ function chessMap.new(levelRows, opts)
     self.goalTiles = {}
     self.mechanismTiles = {}
     self.tunnelsById = {}  -- id -> array of {col,row} (normally exactly 2 -- an entrance and its exit)
+    self.cageGroups = {}   -- id -> { buttons = {{col,row},...}, cages = {{col,row},...} }
 
     for r = 1, self.rows do
         self.tiles[r] = {}
@@ -143,6 +155,23 @@ function chessMap.new(levelRows, opts)
         tile.tunnelId = t.id
         self.tunnelsById[t.id] = self.tunnelsById[t.id] or {}
         table.insert(self.tunnelsById[t.id], { col = t.col, row = t.row })
+    end
+
+    -- cage pairing: opts.cages = { {id=, kind="button"|"cage", col=, row=}, ... }
+    -- -- tags the already-placed CAGE ('C') / CAGE_BUTTON ('B') tile with
+    -- which group it belongs to. A group can have several buttons and/or
+    -- several cage tiles sharing one id; :tickCageGroup (driven by
+    -- chessUpdtr) opens every cage tile in a group whenever any of its
+    -- button tiles is occupied by a pawn, and closes them again once none are.
+    for _, c in ipairs(opts.cages or {}) do
+        local tile = self.tiles[c.row] and self.tiles[c.row][c.col]
+        local wantType = (c.kind == "button") and chessMap.TILE.CAGE_BUTTON or chessMap.TILE.CAGE
+        assert(tile and tile.type == wantType,
+            "chessMap: opts.cages entry at (" .. c.col .. "," .. c.row .. ") isn't a " ..
+            (c.kind == "button" and "CAGE_BUTTON ('B')" or "CAGE ('C')") .. " tile")
+        self.cageGroups[c.id] = self.cageGroups[c.id] or { buttons = {}, cages = {} }
+        local list = (c.kind == "button") and self.cageGroups[c.id].buttons or self.cageGroups[c.id].cages
+        table.insert(list, { col = c.col, row = c.row })
     end
 
     self.tileVisuals = {} -- [row][col] = { bg=rect, overlay=image|nil }
@@ -182,6 +211,7 @@ function chessMap:isWalkable(col, row, pawn)
     local tile = self:getTile(col, row)
     if not tile then return false end
     if tile.type == chessMap.TILE.WALL or tile.type == chessMap.TILE.VOID then return false end
+    if tile.type == chessMap.TILE.CAGE then return false end -- closed gate: blocks like a wall
     if TINY_ONLY_TILES[tile.type] then
         return pawn ~= nil and pawn.traits ~= nil and pawn.traits["tiny_size"] == true
     end
@@ -191,10 +221,11 @@ end
 function chessMap:isBlocking(col, row)
     -- true if a straight-line effect (like Fire Beam) should stop here.
     -- JAIL/WALL_HOLE/TUNNEL are all physically slim enough to see through
-    -- (bars, a hole, a tunnel mouth) -- only a solid WALL blocks sight.
+    -- (bars, a hole, a tunnel mouth) -- only a solid WALL or closed CAGE
+    -- blocks sight.
     local tile = self:getTile(col, row)
     if not tile then return true end
-    return tile.type == chessMap.TILE.WALL
+    return tile.type == chessMap.TILE.WALL or tile.type == chessMap.TILE.CAGE
 end
 
 -- Returns the OTHER end of a paired tunnel (col,row belongs to), or nil if
@@ -235,8 +266,13 @@ function chessMap:draw(parentGroup)
             local overlay = nil
             local imgPath = TILE_OVERLAY_IMAGE[tile.type]
             if imgPath then
+                -- display.newImageRect returns nil (not an error) if the
+                -- image file is missing -- fall back to the solid-color
+                -- tile rather than crashing on a not-yet-added asset.
                 overlay = display.newImageRect(group, imgPath, self.tileSize * 0.8, self.tileSize * 0.8)
-                overlay.x, overlay.y = x, y
+                if overlay then
+                    overlay.x, overlay.y = x, y
+                end
             end
 
             self.tileVisuals[r][c] = { bg = bg, overlay = overlay }
@@ -263,7 +299,9 @@ function chessMap:refreshTile(col, row)
     if imgPath then
         local x, y = self:gridToWorld(col, row)
         local overlay = display.newImageRect(self.displayGroup, imgPath, self.tileSize * 0.8, self.tileSize * 0.8)
-        overlay.x, overlay.y = x, y
+        if overlay then
+            overlay.x, overlay.y = x, y
+        end
         vis.overlay = overlay
     end
 end
@@ -293,6 +331,23 @@ end
 
 function chessMap:getGoalTiles()
     return self.goalTiles
+end
+
+-- Opens or closes every CAGE tile in group `groupId` (a no-op for any tile
+-- already in that state, so it's safe to call every turn regardless of
+-- whether anything actually changed). See chessUpdtr:tickCages, which
+-- decides `isOpen` per group by checking its button tiles for occupants.
+function chessMap:setCageOpen(groupId, isOpen)
+    local group = self.cageGroups[groupId]
+    if not group then return end
+    local wantType = isOpen and chessMap.TILE.CAGE_OPEN or chessMap.TILE.CAGE
+    for _, spot in ipairs(group.cages) do
+        local tile = self.tiles[spot.row][spot.col]
+        if tile.type ~= wantType then
+            tile.type = wantType
+            self:refreshTile(spot.col, spot.row)
+        end
+    end
 end
 
 return chessMap
