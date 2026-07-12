@@ -5,6 +5,18 @@
     traitMng + historyMng together into one playable demo scene. See
     modules/ for the actual systems -- this file is just the assembly + a
     thin sidebar UI.
+
+    Multi-stage: STAGES lists each stage's level data in order. Persistent
+    screen chrome (title, sidebar shell, zoom/hotkeys, the toggle button)
+    is created once, below. Everything that's specific to ONE stage's board
+    (map, camera, pawns, controller, history) is built by loadStage(),
+    which tears down the previous stage's board-scoped state first and
+    reassigns the SAME shared locals rather than shadowing them -- so
+    every event listener registered once, below, keeps working against
+    whichever stage is currently loaded without needing to be re-registered
+    each time. levelCleared (dispatched by chessUpdtr:checkClearCondition)
+    advances to the next stage automatically; clearing the last one ends
+    the run.
 ]]
 
 display.setDefault("background", 0.05, 0.05, 0.07)
@@ -12,18 +24,21 @@ display.setDefault("background", 0.05, 0.05, 0.07)
 require("_mcp_touch")  -- Auto-injected by MCP server
 require("_mcp_screenshot")  -- Auto-injected by MCP server
 require("_mcp_logger")  -- Auto-injected by MCP server
-local chessMap    = require("modules.chessMap")
-local pawnDplyr   = require("modules.pawnDplyr")
-local pawnCon     = require("modules.pawnCon")
-local abltMng     = require("modules.abltMng")
-local chessUpdtr  = require("modules.chessUpdtr")
-local camera      = require("modules.camera")
-local traitMng    = require("modules.traitMng")
-local historyMng  = require("modules.historyMng")
-local sampleLevel = require("data.sampleLevel")
+local chessMap     = require("modules.chessMap")
+local pawnDplyr    = require("modules.pawnDplyr")
+local pawnCon      = require("modules.pawnCon")
+local abltMng      = require("modules.abltMng")
+local chessUpdtr   = require("modules.chessUpdtr")
+local camera       = require("modules.camera")
+local traitMng     = require("modules.traitMng")
+local historyMng   = require("modules.historyMng")
+local sampleLevel  = require("data.sampleLevel")
+local sampleLevel2 = require("data.sampleLevel2")
 
 abltMng.registerDefaults()
 traitMng.registerDefaults()
+
+local STAGES = { sampleLevel, sampleLevel2 }
 
 -- ------------------------------------------------------------------ TITLE
 local titleText = display.newText({
@@ -49,61 +64,10 @@ local BOARD_H = (SCREEN_Y + SCREEN_H) - BOARD_Y - 10
 
 local TILE_SIZE = 48
 
-local map = chessMap.new(sampleLevel.rows, { tileSize = TILE_SIZE, tunnels = sampleLevel.tunnels, cages = sampleLevel.cages })
-
--- Board background: fills the whole viewport so any map underflow is clean.
+-- Board background: fills the whole viewport so any map underflow is
+-- clean. Persistent across stages -- it's just a static backdrop rect.
 local boardBg = display.newRect(BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2, BOARD_W, BOARD_H)
 boardBg:setFillColor(0.05, 0.05, 0.07)
-
--- Viewport container: clips worldGroup to the board area and sits at the
--- viewport's screen center, so world point (0,0) in camera math maps to
--- that screen center -- see modules/camera.lua's docstring. worldGroup
--- holds everything board-related (tiles, tap rect, pawns).
-local boardContainer = display.newContainer(BOARD_W, BOARD_H)
-boardContainer.x, boardContainer.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
-
-local worldGroup = display.newGroup()
-boardContainer:insert(worldGroup)
-
-map:draw(worldGroup)
-
--- invisible full-map-sized rect that catches taps on empty tiles; pawns
--- sit above it in the display list so they intercept their own taps first
--- Positioned at (0,0) so boardHit:contentToLocal() returns map-world coords.
-local boardHit = display.newRect(0, 0, map.pixelW, map.pixelH)
-boardHit:setFillColor(1, 1, 1, 0.01)
-worldGroup:insert(boardHit)
-
-local pawnGroup = display.newGroup()
-worldGroup:insert(pawnGroup)
-
-local cam = camera.new({
-    worldGroup = worldGroup,
-    worldW = map.pixelW, worldH = map.pixelH,
-    viewportW = BOARD_W, viewportH = BOARD_H,
-    boardCenterX = 0, boardCenterY = 0, -- container already centers on screen
-    panTime = 180,
-})
-
-local function focusCameraOnGrid(col, row, opts)
-    local wx, wy = map:gridToWorld(col, row)
-    cam:focusOn(wx, wy, opts)
-end
-
--- ------------------------------------------------------------------ PAWNS
-local dplyr = pawnDplyr.new(map, pawnGroup)
-dplyr:autoDeployFromMap(sampleLevel.assignments)
-for _, extra in ipairs(sampleLevel.extras) do
-    dplyr:deploy(extra.kind, extra.col, extra.row)
-end
-
--- ------------------------------------------------------------------ LOGIC
-local updtr = chessUpdtr.new(map, dplyr)
-local con = pawnCon.new(dplyr, map, updtr, boardHit)
-
-for _, pawn in pairs(dplyr.pawns) do
-    con:registerSelectable(pawn)
-end
 
 -- ------------------------------------------------------------------- UI
 -- Thin sidebar: just status text now. Push/Swap/Pull are automatic
@@ -139,12 +103,11 @@ local modeLabel = display.newText({
 modeLabel:setFillColor(0.6, 0.85, 1)
 
 -- Selected pawn's full kit: its Move/Facing-trigger ability (the one
--- wired to movingAbility -- Push/Pull/Kick/Throw/Swap), its Active/
--- Passive/Flow abilities (pawn.abilities, split by abltMng.TRIGGER), and
--- its Traits (pawn.traits, via traitMng). Passive/Flow will read "--" for
--- every pawn today since no default ability registers with those
--- triggers yet (see abltMng.lua's taxonomy comment) -- the rows are here
--- so they display the moment one exists.
+-- wired to movingAbility -- Push/Pull/Kick/Throw/Swap), its Attack/
+-- Active/Passive/Flow abilities (pawn.abilities, split by abltMng.TRIGGER),
+-- and its Traits (pawn.traits, via traitMng). Attack only shows up for
+-- hostiles (see updateAbilitiesLabel); Passive/Flow read "--" for every
+-- pawn today since no default ability registers with those triggers yet.
 local abilitiesText = display.newText({
     parent = sidebarGroup, text = "",
     x = SIDEBAR_X + SIDEBAR_W / 2, y = BOARD_Y + 108, font = native.systemFont, fontSize = 11,
@@ -250,38 +213,121 @@ toggleBg:addEventListener("tap", function()
     return true
 end)
 
--- --------------------------------------------------------------- HISTORY
--- Full-state undo/redo/restart -- see modules/historyMng.lua. A snapshot
--- is taken after every move/ability/completed round via
--- updtr.onStateChanged; the very first snapshot (below, after this block)
--- is the level's starting state, which Restart jumps back to.
-local history = historyMng.new(map, dplyr, updtr)
+-- ------------------------------------------------------------- PER-STAGE
+-- Declared here (not `local` inside loadStage) so every closure below --
+-- focusCameraOnGrid, the Runtime listeners, loadStage itself on the next
+-- call -- shares these as upvalues and automatically follows along
+-- whenever loadStage reassigns them for a new stage.
+local map, boardContainer, worldGroup, boardHit, pawnGroup, cam
+local dplyr, updtr, con, history
+local currentStageIndex = 0
 
-history.onPawnRecreated = function(pawn)
-    con:registerSelectable(pawn)
+local function focusCameraOnGrid(col, row, opts)
+    local wx, wy = map:gridToWorld(col, row)
+    cam:focusOn(wx, wy, opts)
 end
 
-history.onApplied = function()
-    local stillSelected = con.selectedId and dplyr:getById(con.selectedId)
-    if stillSelected then
-        con:select(con.selectedId)
-    else
-        local pcs = dplyr:getAllByFaction("pc")
-        table.sort(pcs, function(a, b) return a.id < b.id end)
-        if pcs[1] then con:select(pcs[1].id) end
+local function loadStage(index)
+    local levelData = STAGES[index]
+    assert(levelData, "loadStage: no stage at index " .. tostring(index))
+    currentStageIndex = index
+
+    -- tear down the previous stage's board-scoped state, if any
+    if con then con:destroy() end
+    if boardContainer then boardContainer:removeSelf() end
+
+    map = chessMap.new(levelData.rows, { tileSize = TILE_SIZE, tunnels = levelData.tunnels, cages = levelData.cages })
+
+    -- Viewport container: clips worldGroup to the board area and sits at
+    -- the viewport's screen center, so world point (0,0) in camera math
+    -- maps to that screen center -- see modules/camera.lua's docstring.
+    -- worldGroup holds everything board-related (tiles, tap rect, pawns).
+    boardContainer = display.newContainer(BOARD_W, BOARD_H)
+    boardContainer.x, boardContainer.y = BOARD_X + BOARD_W / 2, BOARD_Y + BOARD_H / 2
+
+    worldGroup = display.newGroup()
+    boardContainer:insert(worldGroup)
+    map:draw(worldGroup)
+
+    -- invisible full-map-sized rect that catches taps on empty tiles;
+    -- pawns sit above it in the display list so they intercept their own
+    -- taps first. Positioned at (0,0) so boardHit:contentToLocal() returns
+    -- map-world coords.
+    boardHit = display.newRect(0, 0, map.pixelW, map.pixelH)
+    boardHit:setFillColor(1, 1, 1, 0.01)
+    worldGroup:insert(boardHit)
+
+    pawnGroup = display.newGroup()
+    worldGroup:insert(pawnGroup)
+
+    cam = camera.new({
+        worldGroup = worldGroup,
+        worldW = map.pixelW, worldH = map.pixelH,
+        viewportW = BOARD_W, viewportH = BOARD_H,
+        boardCenterX = 0, boardCenterY = 0, -- container already centers on screen
+        panTime = 180,
+    })
+
+    dplyr = pawnDplyr.new(map, pawnGroup)
+    dplyr:autoDeployFromMap(levelData.assignments)
+    for _, extra in ipairs(levelData.extras or {}) do
+        dplyr:deploy(extra.kind, extra.col, extra.row)
     end
 
-    local selPawn = con:getSelected()
-    if selPawn then focusCameraOnGrid(selPawn.col, selPawn.row, { instant = true }) end
+    updtr = chessUpdtr.new(map, dplyr)
+    con = pawnCon.new(dplyr, map, updtr, boardHit)
+    for _, pawn in pairs(dplyr.pawns) do
+        con:registerSelectable(pawn)
+    end
 
-    local who = (updtr.turn == "pc") and "Player" or "Enemy"
-    turnLabel.text = string.format("Turn: %s (Round %d)", who, updtr.roundNumber)
-    logText.text = "History restored."
+    -- Full-state undo/redo/restart -- see modules/historyMng.lua. A
+    -- snapshot is taken after every move/ability/completed round via
+    -- updtr.onStateChanged; the very first snapshot (below, after this
+    -- block) is this stage's starting state, which Restart jumps back to.
+    history = historyMng.new(map, dplyr, updtr)
+
+    history.onPawnRecreated = function(pawn)
+        con:registerSelectable(pawn)
+    end
+
+    history.onApplied = function()
+        local stillSelected = con.selectedId and dplyr:getById(con.selectedId)
+        if stillSelected then
+            con:select(con.selectedId)
+        else
+            local pcs = dplyr:getAllByFaction("pc")
+            table.sort(pcs, function(a, b) return a.id < b.id end)
+            if pcs[1] then con:select(pcs[1].id) end
+        end
+
+        local selPawn = con:getSelected()
+        if selPawn then focusCameraOnGrid(selPawn.col, selPawn.row, { instant = true }) end
+
+        local who = (updtr.turn == "pc") and "Player" or "Enemy"
+        turnLabel.text = string.format("Turn: %s (Round %d)", who, updtr.roundNumber)
+        logText.text = "History restored."
+    end
+
+    updtr.onStateChanged = function() history:snapshot() end
+
+    local firstPCs = dplyr:getAllByFaction("pc")
+    table.sort(firstPCs, function(a, b) return a.id < b.id end)
+    if firstPCs[1] then
+        focusCameraOnGrid(firstPCs[1].col, firstPCs[1].row, { instant = true })
+        con:select(firstPCs[1].id)
+    end
+
+    turnLabel.text = "Turn: Player (Round 1)"
+    logText.text = string.format("Stage %d of %d", index, #STAGES)
+
+    -- stage-start baseline snapshot -- Restart (R) jumps back to this
+    history:snapshot()
 end
 
-updtr.onStateChanged = function() history:snapshot() end
-
 -- --------------------------------------------------------------- EVENTS
+-- Registered exactly once. Each references map/dplyr/con/updtr/cam/history
+-- as upvalues, so they keep working correctly across stage transitions --
+-- loadStage reassigns those same variables rather than shadowing them.
 Runtime:addEventListener("pawnSelected", function(event)
     local pawn = dplyr:getById(event.pawnId)
     updateSelectedLabel(pawn)
@@ -322,8 +368,17 @@ Runtime:addEventListener("abilityResolved", function(event)
     updateAbilitiesLabel(con:getSelected())
 end)
 
+-- Stage 1 clearing loads Stage 2 automatically (a beat later, so the
+-- "cleared" message is actually visible before the board changes out from
+-- under it); clearing the last stage ends the run instead.
 Runtime:addEventListener("levelCleared", function()
-    logText.text = "LEVEL CLEARED!"
+    if currentStageIndex < #STAGES then
+        logText.text = string.format("STAGE %d CLEARED! Loading stage %d...", currentStageIndex, currentStageIndex + 1)
+        local nextIndex = currentStageIndex + 1
+        timer.performWithDelay(900, function() loadStage(nextIndex) end)
+    else
+        logText.text = "ALL STAGES CLEARED -- YOU WIN!"
+    end
 end)
 
 Runtime:addEventListener("levelFailed", function()
@@ -358,12 +413,4 @@ Runtime:addEventListener("key", function(event)
 end)
 
 -- ------------------------------------------------------------- KICK OFF
-local firstPCs = dplyr:getAllByFaction("pc")
-table.sort(firstPCs, function(a, b) return a.id < b.id end)
-if firstPCs[1] then
-    focusCameraOnGrid(firstPCs[1].col, firstPCs[1].row, { instant = true })
-    con:select(firstPCs[1].id)
-end
-
--- level-start baseline snapshot -- Restart (R) jumps back to this
-history:snapshot()
+loadStage(1)

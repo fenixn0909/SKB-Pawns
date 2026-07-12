@@ -265,6 +265,10 @@ updtr.turn = chessUpdtr.TURN.PC -- ensure we start from PC phase like real play
 updtr:endTurn() -- PC -> enemy (AI fires) -> PC
 assert(mage.hp < mageHpBefore, "mage should have taken beam damage from the automatic enemy AI phase, hp=" .. tostring(mage.hp))
 print("auto enemy AI OK: mage hp", mageHpBefore, "->", mage.hp)
+mage.hp = mage.maxHp -- heal back, and...
+if mage.hpText then mage.hpText.text = tostring(mage.hp) end
+dplyr:moveTo(mage.id, 10, 8) -- ...move off turret's row -- reactive attacks (see below) would otherwise keep re-hitting it here
+dplyr:moveTo(turret.id, 18, 3) -- back to its own spawn -- (3,7) shares a column with slinger's native spawn (3,4)
 
 -- ------------------------------------------------------- PUSH (MOVING)
 line("PUSH (MOVING) -- UNLIMITED CHAIN")
@@ -382,7 +386,7 @@ assert(not dplyr:hasTrait(knight, "stealth"), "knight should not have stealth na
 -- and relocate Scout out of the test lane first so it survives (removing
 -- it outright would break the tunnel tests that need it later).
 dplyr:moveTo(scout.id, 17, 4)
-dplyr:moveTo(slinger.id, 18, 4)
+dplyr:moveTo(slinger.id, 19, 4) -- NOT col 18 -- that's Turret/Wraith's column, and reactive attacks (see below) would otherwise snipe it here
 dplyr:moveTo(turret.id, 2, 4)
 dplyr:moveTo(knight.id, 10, 4)
 for c = 3, 9 do
@@ -612,6 +616,8 @@ for c = 3, 8 do
 end
 dplyr:moveTo(mage.id, 9, 3)
 
+treant._actedThisRound = nil -- this test targets the endTurn catch-all pass specifically -- start both fresh regardless of reactive history earlier in the file
+spitter._actedThisRound = nil
 local knightHp8, mageHp8 = knight.hp, mage.hp
 updtr.turn = chessUpdtr.TURN.PC
 updtr:endTurn()
@@ -619,7 +625,36 @@ assert(knight.hp < knightHp8, "treant should have auto-hit knight during the ene
 assert(mage.hp < mageHp8, "spitter should have auto-hit mage during the enemy phase")
 print("generalized AI OK: knight hp", knightHp8, "->", knight.hp, "-- mage hp", mageHp8, "->", mage.hp)
 dplyr:moveTo(treant.id, 30, 11) -- park back near its spawn -- the Throw tests below reuse row 8
+dplyr:moveTo(spitter.id, 30, 13)
 dplyr:moveTo(knight.id, 3, 12)
+
+-- ---------------------------------------------------- REACTIVE HOSTILE AI
+line("REACTIVE ATTACKS -- FIRE THE MOMENT A PC ENTERS RANGE, NOT JUST AT END TURN")
+knight.hp = knight.maxHp -- heal first -- this test lands 2 separate hits, and damage carried in from the previous test would otherwise kill (and remove) it
+if knight.hpText then knight.hpText.text = tostring(knight.hp) end
+treant._actedThisRound = nil
+dplyr:moveTo(treant.id, 16, 8)
+dplyr:moveTo(knight.id, 16, 9) -- not adjacent yet -- one tile short
+assert(updtr.turn == chessUpdtr.TURN.PC, "should still be the PC's own turn for this test")
+local reactHpBefore = knight.hp
+local stepOk = updtr:requestStep(knight, 0, -1) -- steps north, right up against the treant
+assert(stepOk, "step should succeed")
+assert(knight.col == 16 and knight.row == 8, "knight should have moved adjacent to the treant")
+assert(knight.hp < reactHpBefore, "the treant should react immediately -- mid-PC-turn, no End Turn needed -- once knight is in range")
+print("reactive OK: treant hit knight for", reactHpBefore - knight.hp, "the instant it stepped into range, still mid-turn")
+
+local afterFirstHitHp = knight.hp
+local guardOk = updtr:useAbility(knight, "guard", nil)
+assert(guardOk, "a second, unrelated action while still adjacent should succeed normally")
+assert(knight.hp == afterFirstHitHp, "the SAME treant should not react again this round -- one reaction per enemy per round, not one per click")
+print("reactive OK: a further action while still adjacent did not provoke a second hit from the same treant this round")
+
+local beforeSecondRoundHp = knight.hp
+updtr:endTurn() -- ends the round the reactive hit happened in -- treant already acted, so this catch-all correctly skips it; this call's own end-of-round step is what resets its flag for NEXT round
+updtr:endTurn() -- a further round with no PC action at all -- the catch-all now finds the reset flag and fires
+assert(knight.hp < beforeSecondRoundHp, "a fresh round should let the treant react again via endTurn's own catch-all pass")
+print("reactive OK: entering a new round refreshed the treant's ability to react, hit knight again for", beforeSecondRoundHp - knight.hp)
+dplyr:moveTo(treant.id, 30, 11) -- park back near its spawn
 
 -- --------------------------------------------------------- KICK (FACING)
 line("KICK (FACING) -- TRIGGERS ON AN ADJACENT PAWN WITHOUT MOVING, SLIDES UNTIL BLOCKED")

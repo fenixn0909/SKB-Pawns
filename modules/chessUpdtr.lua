@@ -454,6 +454,7 @@ function chessUpdtr:requestStep(pawn, dCol, dRow)
         local result = movingDef.execute(pawn, { dCol = dCol, dRow = dRow }, self.ctx) or {}
         local ok = (result.ok ~= false)
         if ok then
+            if pawn.faction == "pc" then self:reactToPlayerAction() end
             self:checkClearCondition()
             self:notifyChanged()
         end
@@ -464,6 +465,7 @@ function chessUpdtr:requestStep(pawn, dCol, dRow)
     if not self.ctx.stepIfClear(pawn, dCol, dRow) then
         return false, "blocked"
     end
+    if pawn.faction == "pc" then self:reactToPlayerAction() end
     self:checkClearCondition()
     self:notifyChanged()
     return true
@@ -496,6 +498,7 @@ function chessUpdtr:useAbility(user, abilityId, target)
     end
 
     local result = def.execute(user, target, self.ctx)
+    if user.faction == "pc" then self:reactToPlayerAction() end
     self:checkClearCondition()
     self:notifyChanged()
     return true, result
@@ -513,9 +516,12 @@ end
 function chessUpdtr:endTurn()
     if self.turn == chessUpdtr.TURN.PC then
         self.turn = chessUpdtr.TURN.ENEMY
-        self:runEnemyPhase()
+        self:runEnemyPhase() -- catch-all: anyone who hasn't reacted yet this round gets one last chance
         self.turn = chessUpdtr.TURN.PC
         self.roundNumber = self.roundNumber + 1
+        for _, enemy in ipairs(self.dplyr:getAllByFaction("enemy")) do
+            enemy._actedThisRound = nil -- fresh reactions for the new round
+        end
         self:tickStatuses()
         self:tickHazards()
         self:notifyChanged()
@@ -526,26 +532,47 @@ function chessUpdtr:endTurn()
 end
 
 -- Each enemy checks every ability it has for an aiPattern (see
--- abltMng.TRIGGER's doc comment) and fires accordingly: "melee4" always
--- fires (no targeting needed), "beam_pierce"/"beam_first" only fire if
--- findBeamTarget finds a clear line to a PC.
+-- abltMng.TRIGGER's doc comment) and fires accordingly: "melee4" fires if
+-- it actually hits someone, "beam_pierce"/"beam_first" only fire if
+-- findBeamTarget finds a clear line to a PC. An enemy that's already
+-- acted this round (see reactToPlayerAction) is skipped -- this is the
+-- guaranteed catch-all pass at End Turn, not a second free hit.
 function chessUpdtr:runEnemyPhase()
     local enemies = self.dplyr:getAllByFaction("enemy")
     for _, enemy in ipairs(enemies) do
-        if enemy.hp and enemy.hp > 0 then
+        if enemy.hp and enemy.hp > 0 and not enemy._actedThisRound then
             for _, abilityId in ipairs(enemy.abilities or {}) do
                 local def = abltMng.get(abilityId)
                 if def and def.aiPattern == "melee4" then
-                    self:useAbility(enemy, abilityId, nil)
+                    local ok, result = self:useAbility(enemy, abilityId, nil)
+                    if ok and result and result.affectedIds and #result.affectedIds > 0 then
+                        enemy._actedThisRound = true
+                    end
                 elseif def and (def.aiPattern == "beam_pierce" or def.aiPattern == "beam_first") then
                     local firedAt = self:findBeamTarget(enemy)
                     if firedAt then
                         self:useAbility(enemy, abilityId, firedAt)
+                        enemy._actedThisRound = true
                     end
                 end
             end
         end
     end
+end
+
+-- Fires right after any PC-initiated move or ability resolves (see
+-- _afterAction) -- "PC action -> Hostile -> Mechanism" means each PC
+-- action gets an immediate hostile-reaction check, not just a single
+-- batch pass at End Turn. Each enemy still only gets ONE reaction per
+-- round (see runEnemyPhase's _actedThisRound check) -- so standing next
+-- to a treant provokes it the moment you step into range, but doesn't
+-- punish every subsequent click that round. Reuses runEnemyPhase's own
+-- dispatch/bookkeeping so there's exactly one place that logic lives.
+function chessUpdtr:reactToPlayerAction()
+    local prevTurn = self.turn
+    self.turn = chessUpdtr.TURN.ENEMY -- useAbility's faction/turn gate needs this
+    self:runEnemyPhase()
+    self.turn = prevTurn
 end
 
 function chessUpdtr:hasAbility(pawn, abilityId)
@@ -608,6 +635,7 @@ end
 
 function chessUpdtr:checkClearCondition()
     self:tickCages()
+    if self.outcomeFired then return end -- already cleared or failed -- don't re-dispatch every subsequent action
 
     local goals = self.map:getGoalTiles()
     if #goals == 0 then return end
@@ -621,12 +649,14 @@ function chessUpdtr:checkClearCondition()
         end
     end
     if allHeld then
+        self.outcomeFired = true
         Runtime:dispatchEvent({ name = "levelCleared" })
         return
     end
 
     local pcs = self.dplyr:getAllByFaction("pc")
     if #pcs == 0 then
+        self.outcomeFired = true
         Runtime:dispatchEvent({ name = "levelFailed" })
     end
 end

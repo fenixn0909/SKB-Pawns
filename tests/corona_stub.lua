@@ -98,9 +98,21 @@ function Runtime:addEventListener(kind, fn)
     listeners[kind] = listeners[kind] or {}
     table.insert(listeners[kind], fn)
 end
+function Runtime:removeEventListener(kind, fn)
+    local hs = listeners[kind]
+    if not hs then return end
+    for i = #hs, 1, -1 do
+        if hs[i] == fn then table.remove(hs, i) end
+    end
+end
 function Runtime:dispatchEvent(event)
     local hs = listeners[event.name] or {}
-    for _, fn in ipairs(hs) do fn(event) end
+    -- iterate a copy: a handler firing during dispatch (e.g. a stage
+    -- transition removing/adding listeners) shouldn't mutate the list out
+    -- from under this loop
+    local snapshot = {}
+    for i, fn in ipairs(hs) do snapshot[i] = fn end
+    for _, fn in ipairs(snapshot) do fn(event) end
 end
 
 print("[corona_stub] fake Solar2D environment loaded")

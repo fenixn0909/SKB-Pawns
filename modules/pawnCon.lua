@@ -34,9 +34,18 @@ function pawnCon.new(dplyrRef, mapRef, updtrRef, boardHitRect)
         return true
     end)
 
-    Runtime:addEventListener("key", function(event) return self:onKeyEvent(event) end)
+    self._keyListener = function(event) return self:onKeyEvent(event) end
+    Runtime:addEventListener("key", self._keyListener)
 
     return self
+end
+
+-- Call when replacing this controller with a fresh one for a new stage --
+-- Runtime listeners are global and outlive any display object, so without
+-- this the old stage's controller would keep processing key events
+-- alongside the new one (double-handling every keypress).
+function pawnCon:destroy()
+    Runtime:removeEventListener("key", self._keyListener)
 end
 
 -- call once right after pawnDplyr:deploy() for every pawn that should be
